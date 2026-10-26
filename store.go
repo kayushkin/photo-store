@@ -25,6 +25,8 @@ import (
 var (
 	ErrNotFound = errors.New("not found")
 	ErrInvalid  = errors.New("invalid")
+	// ErrConflict is a change a purged photo refuses.
+	ErrConflict = errors.New("conflict")
 )
 
 // Store owns the database and the thumbnails directory.
@@ -61,11 +63,28 @@ func Open(dataDir string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if err := addPurgedAt(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	if err := os.Chmod(dbPath, 0o600); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{db: db, dataDir: dataDir}, nil
+}
+
+// addPurgedAt adds photos.purged_at to a database made before it existed.
+func addPurgedAt(db *sql.DB) error {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('photos') WHERE name = 'purged_at'`).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	_, err := db.Exec(`ALTER TABLE photos ADD COLUMN purged_at INTEGER NOT NULL DEFAULT 0`)
+	return err
 }
 
 // Close releases the database handle.
@@ -86,7 +105,7 @@ func (s *Store) ThumbnailPath(sha256 string) string {
 }
 
 const photoColumns = `id, sha256, source_machine, source_path, folder, media_type, taken_at, date_source,
-	latitude, longitude, width, height, description, described_by, tags, created_at, updated_at, deleted_at`
+	latitude, longitude, width, height, description, described_by, tags, created_at, updated_at, deleted_at, purged_at`
 
 type queryer interface {
 	Exec(query string, args ...any) (sql.Result, error)
@@ -100,7 +119,7 @@ func scanPhoto(scan func(...any) error) (*Photo, error) {
 	var tags string
 	if err := scan(&photo.ID, &photo.Sha256, &photo.SourceMachine, &photo.SourcePath, &photo.Folder, &photo.MediaType,
 		&photo.TakenAt, &photo.DateSource, &latitude, &longitude, &photo.Width, &photo.Height, &photo.Description,
-		&photo.DescribedBy, &tags, &photo.CreatedAt, &photo.UpdatedAt, &photo.DeletedAt); err != nil {
+		&photo.DescribedBy, &tags, &photo.CreatedAt, &photo.UpdatedAt, &photo.DeletedAt, &photo.PurgedAt); err != nil {
 		return nil, err
 	}
 	if latitude.Valid && longitude.Valid {
@@ -239,6 +258,7 @@ func (s *Store) Import(request ImportRequest) (*ImportResult, error) {
 		seen[photo.Sha256] = true
 	}
 	result := &ImportResult{IDs: make([]string, 0, len(request.Photos))}
+	purged := map[string]bool{}
 	err := s.inTransaction(func(tx *sql.Tx) error {
 		at := now()
 		for _, photo := range request.Photos {
@@ -271,6 +291,11 @@ func (s *Store) Import(request ImportRequest) (*ImportResult, error) {
 				return err
 			}
 			result.IDs = append(result.IDs, existing)
+			if current.PurgedAt != 0 {
+				purged[photo.Sha256] = true
+				result.Skipped++
+				continue
+			}
 			if current.SourceMachine == photo.SourceMachine && current.SourcePath == photo.SourcePath &&
 				current.Folder == photo.Folder && current.MediaType == photo.MediaType && current.TakenAt == photo.TakenAt &&
 				current.DateSource == photo.DateSource && sameFloat(current.Latitude, photo.Latitude) &&
@@ -295,6 +320,9 @@ func (s *Store) Import(request ImportRequest) (*ImportResult, error) {
 		return nil, err
 	}
 	for _, photo := range request.Photos {
+		if purged[photo.Sha256] {
+			continue
+		}
 		if err := writeFileAtomically(s.ThumbnailPath(photo.Sha256), photo.ThumbnailJPEG); err != nil {
 			return nil, fmt.Errorf("thumbnail of %s: %w", photo.Sha256, err)
 		}
@@ -476,12 +504,16 @@ func (s *Store) Delete(id string) error {
 	})
 }
 
-// Restore brings a deleted photo back as it was.
+// Restore brings a deleted photo back as it was; a purged one cannot come
+// back.
 func (s *Store) Restore(id string) (*Photo, error) {
 	err := s.inTransaction(func(tx *sql.Tx) error {
 		photo, err := getRow(tx, id)
 		if err != nil {
 			return err
+		}
+		if photo.PurgedAt != 0 {
+			return fmt.Errorf("%w: photo %s is purged and cannot be restored", ErrConflict, id)
 		}
 		if photo.DeletedAt == 0 {
 			return nil
@@ -497,6 +529,45 @@ func (s *Store) Restore(id string) (*Photo, error) {
 		return nil, err
 	}
 	return s.Get(id, false)
+}
+
+// Purge removes a photo for good, the one exception to nothing being
+// hard-deleted, for a picture that must not be kept (an ID, a card, a
+// document): it deletes the thumbnail file, blanks the description in the row
+// and in every revision, marks the photo deleted and purged, and makes every
+// later import skip it. The row stays, so a citation of the id still says
+// what happened. Purging again changes nothing.
+func (s *Store) Purge(id string) error {
+	var sha string
+	err := s.inTransaction(func(tx *sql.Tx) error {
+		photo, err := getRow(tx, id)
+		if err != nil {
+			return err
+		}
+		sha = photo.Sha256
+		if photo.PurgedAt != 0 {
+			return nil
+		}
+		at := now()
+		deletedAt := photo.DeletedAt
+		if deletedAt == 0 {
+			deletedAt = at
+		}
+		if _, err := tx.Exec(`UPDATE photos SET description='', described_by='', deleted_at=?, purged_at=?, updated_at=? WHERE id=?`,
+			deletedAt, at, at, id); err != nil {
+			return err
+		}
+		_, err = tx.Exec(`UPDATE photo_revisions SET row_json = json_set(row_json, '$.description', '', '$.described_by', '')
+			WHERE photo_id = ?`, id)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(s.ThumbnailPath(sha)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("photo %s is purged but its thumbnail is still on disk: %w", id, err)
+	}
+	return nil
 }
 
 // Revisions is a photo's history, newest first.

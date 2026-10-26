@@ -30,6 +30,7 @@ file 0600).
 | `description` | markdown; `[text](ref:<id>)` links name people and events |
 | `described_by` | who wrote the description; required with one |
 | `tags` | JSON array of strings |
+| `deleted_at`, `purged_at` | epoch seconds; 0 = not. A purged photo is also deleted |
 
 ## Routes
 
@@ -43,9 +44,10 @@ file 0600).
 | `GET` | `/photos/{id}` | deleted is 404 unless `?include_deleted=true` |
 | `PATCH` | `/photos/{id}` | any of `description`, `described_by`, `tags`, `taken_at`, `date_source`; any other key or `null` is a 400 |
 | `DELETE` | `/photos/{id}` | soft, **204** |
-| `POST` | `/photos/{id}/restore` | |
+| `POST` | `/photos/{id}/restore` | a purged photo is a **409** |
+| `POST` | `/photos/{id}/purge` | removes the photo for good, for a picture that must not be kept (an ID, a card, a document): deletes its thumbnail file, blanks its description in the row and every revision, marks it deleted and purged, and makes every later import skip it. The row stays so a citation still resolves. Again is a no-op. Answers the photo |
 | `GET` | `/photos/{id}/revisions` | newest first, each the whole row as it was |
-| `GET` | `/photos/{id}/thumbnail` | the JPEG; served for a deleted photo too, so a citation keeps drawing |
+| `GET` | `/photos/{id}/thumbnail` | the JPEG; served for a deleted photo too, so a citation keeps drawing; a purged photo is a **410** |
 
 ## Importing
 

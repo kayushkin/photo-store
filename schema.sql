@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS photos (
     tags            TEXT NOT NULL DEFAULT '[]',    -- JSON array of strings
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
-    deleted_at      INTEGER NOT NULL DEFAULT 0
+    deleted_at      INTEGER NOT NULL DEFAULT 0,
+    purged_at       INTEGER NOT NULL DEFAULT 0     -- when its thumbnail and description were removed for good; 0 = never
 );
 CREATE INDEX IF NOT EXISTS idx_photos_taken  ON photos(deleted_at, taken_at, seq);
 CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder, deleted_at, taken_at);

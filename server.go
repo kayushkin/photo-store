@@ -25,6 +25,7 @@ func RegisterHandlers(mux *http.ServeMux, s *Store) {
 	mux.HandleFunc("PATCH /photos/{id}", h.patch)
 	mux.HandleFunc("DELETE /photos/{id}", h.remove)
 	mux.HandleFunc("POST /photos/{id}/restore", h.restore)
+	mux.HandleFunc("POST /photos/{id}/purge", h.purge)
 	mux.HandleFunc("GET /photos/{id}/revisions", h.revisions)
 	mux.HandleFunc("GET /photos/{id}/thumbnail", h.thumbnail)
 }
@@ -154,6 +155,17 @@ func (h *handler) remove(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *handler) purge(w http.ResponseWriter, r *http.Request) {
+	if respondError(w, h.s.Purge(r.PathValue("id"))) {
+		return
+	}
+	photo, err := h.s.Get(r.PathValue("id"), true)
+	if respondError(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, photo)
+}
+
 func (h *handler) restore(w http.ResponseWriter, r *http.Request) {
 	photo, err := h.s.Restore(r.PathValue("id"))
 	if respondError(w, err) {
@@ -183,6 +195,10 @@ func (h *handler) revisions(w http.ResponseWriter, r *http.Request) {
 func (h *handler) thumbnail(w http.ResponseWriter, r *http.Request) {
 	photo, err := h.s.Get(r.PathValue("id"), true)
 	if respondError(w, err) {
+		return
+	}
+	if photo.PurgedAt != 0 {
+		writeErr(w, http.StatusGone, fmt.Sprintf("photo %s was purged: its thumbnail is gone for good", photo.ID))
 		return
 	}
 	content, err := os.ReadFile(h.s.ThumbnailPath(photo.Sha256))
@@ -217,6 +233,8 @@ func respondError(w http.ResponseWriter, err error) bool {
 		writeErr(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, ErrInvalid):
 		writeErr(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrConflict):
+		writeErr(w, http.StatusConflict, err.Error())
 	default:
 		log.Printf("photo-store: %v", err)
 		writeErr(w, http.StatusInternalServerError, err.Error())

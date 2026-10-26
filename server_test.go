@@ -217,3 +217,42 @@ func TestDeleteIsSoftAndTheThumbnailStillServes(t *testing.T) {
 		t.Errorf("an unknown photo's thumbnail = %d, want 404", status)
 	}
 }
+
+func TestPurgeRemovesTheThumbnailAndDescriptionForGood(t *testing.T) {
+	service := newTestService(t)
+	photo := photoOf("k", 100)
+	service.call(http.MethodPost, "/imports", ImportRequest{Photos: []ImportPhoto{photo}}, nil)
+	description, by := "A driver's licence", "test"
+	service.call(http.MethodPatch, "/photos/photo_000001", PhotoPatch{Description: &description, DescribedBy: &by}, nil)
+	var purged Photo
+	if status, body := service.call(http.MethodPost, "/photos/photo_000001/purge", nil, &purged); status != http.StatusOK {
+		t.Fatalf("purge = %d %s", status, body)
+	}
+	if purged.PurgedAt == 0 || purged.DeletedAt == 0 || purged.Description != "" || purged.DescribedBy != "" {
+		t.Errorf("purged = %+v", purged)
+	}
+	if status, _ := service.call(http.MethodGet, "/photos/photo_000001/thumbnail", nil, nil); status != http.StatusGone {
+		t.Errorf("a purged photo's thumbnail = %d, want 410", status)
+	}
+	var revisions []Revision
+	service.call(http.MethodGet, "/photos/photo_000001/revisions", nil, &revisions)
+	for _, revision := range revisions {
+		if revision.Photo.Description != "" {
+			t.Errorf("revision %d keeps the description %q", revision.RevisionID, revision.Photo.Description)
+		}
+	}
+	if status, _ := service.call(http.MethodPost, "/photos/photo_000001/restore", nil, nil); status != http.StatusConflict {
+		t.Errorf("restoring a purged photo = %d, want 409", status)
+	}
+	var result ImportResult
+	service.call(http.MethodPost, "/imports", ImportRequest{Photos: []ImportPhoto{photo}}, &result)
+	if result.Skipped != 1 {
+		t.Errorf("re-import = %+v, want it skipped", result)
+	}
+	if status, _ := service.call(http.MethodGet, "/photos/photo_000001/thumbnail", nil, nil); status != http.StatusGone {
+		t.Errorf("after a re-import the thumbnail = %d, want 410: an import must not bring it back", status)
+	}
+	if status, _ := service.call(http.MethodPost, "/photos/photo_000001/purge", nil, nil); status != http.StatusOK {
+		t.Errorf("purging again = %d, want 200", status)
+	}
+}

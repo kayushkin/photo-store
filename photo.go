@@ -29,6 +29,10 @@ type Photo struct {
 	CreatedAt   int64    `json:"created_at"`
 	UpdatedAt   int64    `json:"updated_at"`
 	DeletedAt   int64    `json:"deleted_at"`
+	// PurgedAt is when the photo was purged: its thumbnail and description are
+	// gone for good, it stays deleted, and an import never brings it back.
+	// 0 = never.
+	PurgedAt int64 `json:"purged_at"`
 }
 
 // ImportPhoto is one photo in POST /imports: its facts and its thumbnail.
