@@ -81,6 +81,20 @@ func ImportMessagesSettingDefinitions() []servicesettings.Definition {
 	}
 }
 
+// ImportFacebookSettingDefinitions declares every environment variable
+// photo-import-facebook reads.
+func ImportFacebookSettingDefinitions() []servicesettings.Definition {
+	return []servicesettings.Definition{
+		{Key: SettingJournalStoreURL, EnvironmentVariable: "JOURNAL_STORE_URL", Kind: msg.ServiceSettingKindWiring, ValueType: msg.ServiceSettingValueTypeString, Default: "http://127.0.0.1:8322",
+			Description: "Where journal-store answers: the Facebook posts a photo is cited by."},
+	}
+}
+
+// NewImportFacebookSettingsRegistry reads photo-import-facebook's settings.
+func NewImportFacebookSettingsRegistry(environment servicesettings.Environment) (*servicesettings.Registry, error) {
+	return servicesettings.New("photo-import-facebook", nil, ImportFacebookSettingDefinitions(), environment)
+}
+
 // NewImportMessagesSettingsRegistry reads the command's settings. It owns no
 // prefix, so only CheckRequired can refuse.
 func NewImportMessagesSettingsRegistry(environment servicesettings.Environment) (*servicesettings.Registry, error) {

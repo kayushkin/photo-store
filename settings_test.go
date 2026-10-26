@@ -34,7 +34,7 @@ func TestTheRegistryReadsDefaultsAndRefusesAnUndeclaredVariable(t *testing.T) {
 // Every environment variable the service's own code reads by name is declared.
 func TestEveryEnvironmentVariableTheServiceReadsIsDeclared(t *testing.T) {
 	declared := map[string]bool{}
-	for _, definition := range append(SettingDefinitions(), ImportMessagesSettingDefinitions()...) {
+	for _, definition := range append(append(SettingDefinitions(), ImportMessagesSettingDefinitions()...), ImportFacebookSettingDefinitions()...) {
 		declared[definition.EnvironmentVariable] = true
 	}
 	filesRead := 0

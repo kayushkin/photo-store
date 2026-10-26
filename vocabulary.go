@@ -9,11 +9,14 @@ const (
 	// DateFromMessage is when the photo was sent in a chat: it was taken then
 	// or before.
 	DateFromMessage = "message"
-	DateUnknown     = "unknown"
+	// DateFromUpload is when the photo was posted to a site such as
+	// Facebook: it was taken then or before.
+	DateFromUpload = "upload"
+	DateUnknown    = "unknown"
 )
 
 // DateSources is every date source a photo can have.
-var DateSources = []string{DateFromExif, DateFromFilename, DateFromMtime, DateFromMessage, DateUnknown}
+var DateSources = []string{DateFromExif, DateFromFilename, DateFromMtime, DateFromMessage, DateFromUpload, DateUnknown}
 
 func knownDateSource(source string) bool {
 	for _, known := range DateSources {

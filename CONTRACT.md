@@ -24,7 +24,7 @@ file 0600).
 | `folder` | the collection it came from (`Pictures/Camera`) |
 | `media_type` | `image/jpeg`, `video/mp4`… |
 | `taken_at` | epoch seconds; 0 only with `date_source` `unknown` |
-| `date_source` | `GET /date-sources`: `exif` (camera), `filename`, `mtime` (weak: copies reset it), `message` (when it was sent in a chat: taken then or before), `unknown` |
+| `date_source` | `GET /date-sources`: `exif` (camera), `filename`, `mtime` (weak: copies reset it), `message` (when it was sent in a chat: taken then or before), `upload` (when it was posted to a site such as Facebook: taken then or before), `unknown` |
 | `latitude`, `longitude` | both or neither; null when the file has no GPS |
 | `width`, `height` | of the original |
 | `description` | markdown; `[text](ref:<id>)` links name people and events |
@@ -37,7 +37,7 @@ file 0600).
 |---|---|---|
 | `GET` | `/health` | `{status, counts:{photos, described, with_gps, deleted, revisions}}` |
 | `GET` | `/settings` | the declared settings |
-| `GET` | `/date-sources` | `["exif","filename","mtime","message","unknown"]` |
+| `GET` | `/date-sources` | `["exif","filename","mtime","message","upload","unknown"]` |
 | `GET` | `/photos` | live photos, oldest taken first. `?from=` (inclusive) `&to=` (exclusive) on `taken_at`, `?folder=`, `?q=` (every word in the description or tags), `?tag=`, `?described=true|false`, `?has_gps=true`, `?include_deleted=true`, `?limit=` (default 100, max 1000), `?offset=` |
 | `POST` | `/imports` | `{"photos":[ImportPhoto…]}` with `thumbnail_jpeg` as base64. Upsert by `sha256`: new is created, known with the same facts is skipped, known with other facts is updated after a revision. **Description and tags are never touched by an import.** One bad photo is a 400 naming its index and writes nothing |
 | `GET` | `/photos/{id}` | deleted is 404 unless `?include_deleted=true` |

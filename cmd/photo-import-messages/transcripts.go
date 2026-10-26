@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
+	photostore "github.com/kayushkin/photo-store"
+	"github.com/kayushkin/photo-store/internal/importbatch"
+	"github.com/kayushkin/photo-store/internal/journalcitation"
 	"os"
 	"path"
 	"path/filepath"
@@ -33,55 +33,6 @@ const discordEpochMilliseconds = 1420070400000
 // that hold threads.
 var facebookMessageFolders = []string{"inbox", "archived_threads", "filtered_threads", "message_requests", "e2ee_cutover"}
 
-type journalStore struct {
-	base   string
-	client *http.Client
-}
-
-type transcript struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Body  string `json:"body"`
-}
-
-// transcriptCiting finds the one transcript with tag whose text holds token,
-// a Discord message id or a file name.
-func (journal journalStore) transcriptCiting(tag, token string) (transcript, error) {
-	query := url.Values{"tag": {tag}, "q": {`"` + token + `"`}, "limit": {"20"}}
-	response, err := journal.client.Get(journal.base + "/entries?" + query.Encode())
-	if err != nil {
-		return transcript{}, err
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		return transcript{}, err
-	}
-	if response.StatusCode != http.StatusOK {
-		return transcript{}, fmt.Errorf("journal-store answered %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var found []transcript
-	if err := json.Unmarshal(body, &found); err != nil {
-		return transcript{}, err
-	}
-	var matches []transcript
-	for _, entry := range found {
-		if strings.Contains(entry.Body, token) {
-			matches = append(matches, entry)
-		}
-	}
-	if len(matches) != 1 {
-		return transcript{}, errNotOneTranscript{count: len(matches)}
-	}
-	return matches[0], nil
-}
-
-type errNotOneTranscript struct{ count int }
-
-func (e errNotOneTranscript) Error() string {
-	return fmt.Sprintf("%d transcripts cite it", e.count)
-}
-
 // chatName is a transcript title's chat: "Discord: rexdawn7, 2026-04-05"
 // gives "rexdawn7".
 func chatName(title string) string {
@@ -94,7 +45,7 @@ func chatName(title string) string {
 
 // importDirectMessages adds the images multichat-fetch-discord-history saved
 // from DMs, each cited by the Discord transcript that holds its message.
-func importDirectMessages(journal journalStore, in *importer, folder string) error {
+func importDirectMessages(journal journalcitation.Store, in *importbatch.Batch, folder string) error {
 	manifest := filepath.Join(folder, "images.jsonl")
 	file, err := os.Open(manifest)
 	if err != nil {
@@ -115,9 +66,9 @@ func importDirectMessages(journal journalStore, in *importer, folder string) err
 		if err != nil {
 			return fmt.Errorf("%s: message id %q: %w", manifest, line.MessageID, err)
 		}
-		found, err := journal.transcriptCiting(discordTranscriptTag, line.MessageID)
-		if _, notOne := err.(errNotOneTranscript); notOne {
-			in.report["no one Discord transcript holds its message ("+err.Error()+")"]++
+		found, err := journal.EntryCiting(discordTranscriptTag, line.MessageID)
+		if _, notOne := err.(journalcitation.ErrNotOne); notOne {
+			in.Report["no one Discord transcript holds its message ("+err.Error()+")"]++
 			continue
 		}
 		if err != nil {
@@ -128,7 +79,7 @@ func importDirectMessages(journal journalStore, in *importer, folder string) err
 			return err
 		}
 		sentAt := time.UnixMilli(snowflake>>22 + discordEpochMilliseconds)
-		in.add(original, line.ContentType, found.ID, "discord/direct-messages/"+chatName(found.Title), sentAt)
+		in.Add(original, line.ContentType, multichatMachine, found.ID, "discord/direct-messages/"+chatName(found.Title), sentAt, photostore.DateFromMessage)
 	}
 	return scanner.Err()
 }
@@ -136,7 +87,7 @@ func importDirectMessages(journal journalStore, in *importer, folder string) err
 // importFacebookMessages adds the photos in a Facebook export's Messenger
 // threads of at most maxMembers people, each cited by the Messenger
 // transcript that names its file.
-func importFacebookMessages(journal journalStore, in *importer, messagesFolder string, maxMembers int) error {
+func importFacebookMessages(journal journalcitation.Store, in *importbatch.Batch, messagesFolder string, maxMembers int) error {
 	exportRoot := filepath.Dir(filepath.Dir(messagesFolder))
 	for _, folder := range facebookMessageFolders {
 		files, err := filepath.Glob(filepath.Join(messagesFolder, folder, "*", "message_*.json"))
@@ -166,9 +117,9 @@ func importFacebookMessages(journal journalStore, in *importer, messagesFolder s
 			for _, message := range thread.Messages {
 				for _, photo := range message.Photos {
 					name := path.Base(photo.URI)
-					found, err := journal.transcriptCiting(messengerTranscriptTag, name)
-					if _, notOne := err.(errNotOneTranscript); notOne {
-						in.report["no one Messenger transcript names its file ("+err.Error()+")"]++
+					found, err := journal.EntryCiting(messengerTranscriptTag, name)
+					if _, notOne := err.(journalcitation.ErrNotOne); notOne {
+						in.Report["no one Messenger transcript names its file ("+err.Error()+")"]++
 						continue
 					}
 					if err != nil {
@@ -176,13 +127,13 @@ func importFacebookMessages(journal journalStore, in *importer, messagesFolder s
 					}
 					original, err := os.ReadFile(filepath.Join(exportRoot, filepath.FromSlash(photo.URI)))
 					if os.IsNotExist(err) {
-						in.report["the export lacks the file"]++
+						in.Report["the export lacks the file"]++
 						continue
 					}
 					if err != nil {
 						return err
 					}
-					in.add(original, mediaTypeOf(name), found.ID, "messages/facebook/"+chatName(found.Title), time.UnixMilli(message.TimestampMs))
+					in.Add(original, mediaTypeOf(name), multichatMachine, found.ID, "messages/facebook/"+chatName(found.Title), time.UnixMilli(message.TimestampMs), photostore.DateFromMessage)
 				}
 			}
 		}

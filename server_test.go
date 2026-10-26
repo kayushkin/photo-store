@@ -165,7 +165,7 @@ func TestTheDateSourcesAreServed(t *testing.T) {
 	service := newTestService(t)
 	var sources []string
 	service.call(http.MethodGet, "/date-sources", nil, &sources)
-	if strings.Join(sources, ",") != "exif,filename,mtime,message,unknown" {
+	if strings.Join(sources, ",") != "exif,filename,mtime,message,upload,unknown" {
 		t.Errorf("date sources = %v", sources)
 	}
 }

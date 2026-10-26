@@ -18,8 +18,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -33,7 +31,8 @@ import (
 
 	"github.com/kayushkin/llm-bridge/servicesettings"
 	photostore "github.com/kayushkin/photo-store"
-	"github.com/kayushkin/photo-store/internal/thumbnail"
+	"github.com/kayushkin/photo-store/internal/importbatch"
+	"github.com/kayushkin/photo-store/internal/journalcitation"
 )
 
 type conversation struct {
@@ -126,29 +125,9 @@ func (m multichat) media(mxc string) ([]byte, error) {
 	return m.get("/media/"+url.PathEscape(server)+"/"+url.PathEscape(id), nil)
 }
 
-type importer struct {
-	photos []photostore.ImportPhoto
-	seen   map[string]bool
-	report map[string]int
-}
-
-func (in *importer) add(original []byte, mediaType, sourcePath, folder string, sentAt time.Time) {
-	digest := sha256.Sum256(original)
-	hash := hex.EncodeToString(digest[:])
-	if in.seen[hash] {
-		in.report["the same picture again"]++
-		return
-	}
-	thumb, width, height, err := thumbnail.Make(original)
-	if err != nil {
-		in.report["not readable as an image"]++
-		return
-	}
-	in.seen[hash] = true
-	in.photos = append(in.photos, photostore.ImportPhoto{Sha256: hash, SourceMachine: "multichat", SourcePath: sourcePath,
-		Folder: folder, MediaType: mediaType, TakenAt: sentAt.Unix(), DateSource: photostore.DateFromMessage,
-		Width: width, Height: height, ThumbnailJPEG: thumb})
-}
+// multichatMachine is the source_machine of every photo this command imports:
+// the original lives with the chat it came from.
+const multichatMachine = "multichat"
 
 func main() {
 	maxMembers := flag.Int("max-members", 8, "take photos only from chats with at most this many members")
@@ -169,7 +148,7 @@ func main() {
 	}
 	chat := multichat{base: settings.String(photostore.SettingMultichatURL), token: settings.String(photostore.SettingMultichatToken),
 		client: &http.Client{Timeout: 2 * time.Minute}}
-	journal := journalStore{base: settings.String(photostore.SettingJournalStoreURL), client: &http.Client{Timeout: time.Minute}}
+	journal := journalcitation.Store{Base: settings.String(photostore.SettingJournalStoreURL), Client: &http.Client{Timeout: time.Minute}}
 	sources := sources{chats: *chats, archive: *archive, directMessages: *directMessages, facebookMessages: *facebookMessages}
 	if err := run(chat, journal, *maxMembers, sources, *storeURL, *dryRun, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "photo-import-messages: %v\n", err)
@@ -185,8 +164,8 @@ type sources struct {
 	facebookMessages string
 }
 
-func run(chat multichat, journal journalStore, maxMembers int, from sources, storeURL string, dryRun bool, out io.Writer) error {
-	in := &importer{seen: map[string]bool{}, report: map[string]int{}}
+func run(chat multichat, journal journalcitation.Store, maxMembers int, from sources, storeURL string, dryRun bool, out io.Writer) error {
+	in := importbatch.New()
 	if from.chats {
 		if err := importChats(chat, in, maxMembers, out); err != nil {
 			return err
@@ -207,10 +186,10 @@ func run(chat multichat, journal journalStore, maxMembers int, from sources, sto
 			return err
 		}
 	}
-	return post(in, storeURL, dryRun, out)
+	return in.Post(storeURL, dryRun, out)
 }
 
-func importChats(chat multichat, in *importer, maxMembers int, out io.Writer) error {
+func importChats(chat multichat, in *importbatch.Batch, maxMembers int, out io.Writer) error {
 	body, err := chat.get("/conversations", nil)
 	if err != nil {
 		return err
@@ -233,57 +212,19 @@ func importChats(chat multichat, in *importer, maxMembers int, out io.Writer) er
 			}
 			original, err := chat.media(message.MediaURL)
 			if err != nil {
-				in.report["the file is gone from the homeserver"]++
+				in.Report["the file is gone from the homeserver"]++
 				continue
 			}
-			in.add(original, message.MediaMimetype, message.Ref, "messages/"+message.Platform+"/"+message.RoomName, message.SentAt)
+			in.Add(original, message.MediaMimetype, multichatMachine, message.Ref, "messages/"+message.Platform+"/"+message.RoomName, message.SentAt, photostore.DateFromMessage)
 		}
 	}
-	fmt.Fprintf(out, "chats: %d photos so far\n", len(in.photos))
-	return nil
-}
-
-func post(in *importer, storeURL string, dryRun bool, out io.Writer) error {
-	for reason, count := range in.report {
-		fmt.Fprintf(out, "skipped %d: %s\n", count, reason)
-	}
-	fmt.Fprintf(out, "read %d photos\n", len(in.photos))
-	if dryRun {
-		fmt.Fprintln(out, "dry run: nothing posted")
-		return nil
-	}
-	var total photostore.ImportResult
-	client := &http.Client{Timeout: 5 * time.Minute}
-	for start := 0; start < len(in.photos); start += 50 {
-		batch := in.photos[start:min(start+50, len(in.photos))]
-		payload, err := json.Marshal(photostore.ImportRequest{Photos: batch})
-		if err != nil {
-			return err
-		}
-		response, err := client.Post(storeURL+"/imports", "application/json", bytes.NewReader(payload))
-		if err != nil {
-			return fmt.Errorf("photos %d–%d: %w (the batches before it were written)", start+1, start+len(batch), err)
-		}
-		answer, _ := io.ReadAll(response.Body)
-		response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			return fmt.Errorf("photos %d–%d: photo-store answered %d: %s", start+1, start+len(batch), response.StatusCode, bytes.TrimSpace(answer))
-		}
-		var result photostore.ImportResult
-		if err := json.Unmarshal(answer, &result); err != nil {
-			return err
-		}
-		total.Created += result.Created
-		total.Updated += result.Updated
-		total.Skipped += result.Skipped
-	}
-	fmt.Fprintf(out, "imported: created %d, updated %d, unchanged %d\n", total.Created, total.Updated, total.Skipped)
+	fmt.Fprintf(out, "chats: %d photos so far\n", len(in.Photos))
 	return nil
 }
 
 // importArchive adds the images multichat-fetch-discord-history saved, each
 // cited by the message log row the archive import made for its message.
-func importArchive(chat multichat, in *importer, archive string) error {
+func importArchive(chat multichat, in *importbatch.Batch, archive string) error {
 	manifests, err := filepath.Glob(filepath.Join(archive, "*", "images.jsonl"))
 	if err != nil {
 		return err
@@ -320,7 +261,7 @@ func importArchive(chat multichat, in *importer, archive string) error {
 			}
 			message, known := byDiscordID[line.MessageID]
 			if !known {
-				in.report["its message is not in the message log (import the archive first)"]++
+				in.Report["its message is not in the message log (import the archive first)"]++
 				continue
 			}
 			original, err := os.ReadFile(filepath.Join(filepath.Dir(manifest), line.Path))
@@ -328,7 +269,7 @@ func importArchive(chat multichat, in *importer, archive string) error {
 				file.Close()
 				return err
 			}
-			in.add(original, line.ContentType, message.Ref, "discord/"+message.NetworkName+"/"+message.ChannelName, message.SentAt)
+			in.Add(original, line.ContentType, multichatMachine, message.Ref, "discord/"+message.NetworkName+"/"+message.ChannelName, message.SentAt, photostore.DateFromMessage)
 		}
 		file.Close()
 		if err := scanner.Err(); err != nil {
