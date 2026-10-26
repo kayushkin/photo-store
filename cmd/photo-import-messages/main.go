@@ -1,0 +1,339 @@
+// Command photo-import-messages imports the photos people sent in the user's
+// chats into photo-store: the images in multichat's message log from rooms of
+// at most -max-members members (never Discord server channels, whose names
+// start with #), with -discord-archive the image attachments
+// multichat-fetch-discord-history saved from the user's own servers, with
+// -discord-direct-messages the ones it saved from the user's DMs, and with
+// -facebook-messages the photos in a Facebook export's Messenger chats of at
+// most -max-members people. A DM or Messenger photo is cited by the
+// journal-store transcript of the day it was sent, found by its Discord
+// message id or file name; -chats=false skips multichat's own chats. Each photo's
+// source is the message it came in (its message_ ref), and its date is when
+// it was sent (date_source message). Running it again changes nothing that
+// did not change.
+//
+//	MULTICHAT_TOKEN=… photo-import-messages -max-members 8 -discord-archive <archive>/discord -dry-run
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/kayushkin/llm-bridge/servicesettings"
+	photostore "github.com/kayushkin/photo-store"
+	"github.com/kayushkin/photo-store/internal/thumbnail"
+)
+
+type conversation struct {
+	RoomID      string `json:"room_id"`
+	Name        string `json:"name"`
+	Platform    string `json:"platform"`
+	MemberCount int    `json:"member_count"`
+}
+
+type loggedMessage struct {
+	Ref              string     `json:"ref"`
+	RoomName         string     `json:"room_name"`
+	Platform         string     `json:"platform"`
+	NetworkName      string     `json:"network_name"`
+	ChannelName      string     `json:"channel_name"`
+	DiscordMessageID string     `json:"discord_message_id"`
+	MediaURL         string     `json:"media_url"`
+	MediaMimetype    string     `json:"media_mimetype"`
+	SentAt           time.Time  `json:"sent_at"`
+	RedactedAt       *time.Time `json:"redacted_at"`
+}
+
+type multichat struct {
+	base, token string
+	client      *http.Client
+}
+
+func (m multichat) get(path string, query url.Values) ([]byte, error) {
+	target := strings.TrimRight(m.base, "/") + "/api" + path
+	if len(query) > 0 {
+		target += "?" + query.Encode()
+	}
+	request, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+m.token)
+	response, err := m.client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("multichat GET %s: %w", path, err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("multichat GET %s: %d %s", path, response.StatusCode, bytes.TrimSpace(body))
+	}
+	return body, nil
+}
+
+// messages pages the whole log for one filter, newest first.
+func (m multichat) messages(filter url.Values) ([]loggedMessage, error) {
+	var all []loggedMessage
+	before := ""
+	for {
+		query := url.Values{"limit": {"1000"}}
+		for key, values := range filter {
+			query[key] = values
+		}
+		if before != "" {
+			query.Set("before", before)
+		}
+		body, err := m.get("/message-log", query)
+		if err != nil {
+			return nil, err
+		}
+		var page struct {
+			Messages []loggedMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil {
+			return nil, err
+		}
+		all = append(all, page.Messages...)
+		if len(page.Messages) < 1000 {
+			return all, nil
+		}
+		before = page.Messages[len(page.Messages)-1].SentAt.Format(time.RFC3339Nano)
+	}
+}
+
+// media fetches mxc://server/id through multichat.
+func (m multichat) media(mxc string) ([]byte, error) {
+	rest, found := strings.CutPrefix(mxc, "mxc://")
+	server, id, ok := strings.Cut(rest, "/")
+	if !found || !ok || server == "" || id == "" {
+		return nil, fmt.Errorf("%q is not an mxc:// URI", mxc)
+	}
+	return m.get("/media/"+url.PathEscape(server)+"/"+url.PathEscape(id), nil)
+}
+
+type importer struct {
+	photos []photostore.ImportPhoto
+	seen   map[string]bool
+	report map[string]int
+}
+
+func (in *importer) add(original []byte, mediaType, sourcePath, folder string, sentAt time.Time) {
+	digest := sha256.Sum256(original)
+	hash := hex.EncodeToString(digest[:])
+	if in.seen[hash] {
+		in.report["the same picture again"]++
+		return
+	}
+	thumb, width, height, err := thumbnail.Make(original)
+	if err != nil {
+		in.report["not readable as an image"]++
+		return
+	}
+	in.seen[hash] = true
+	in.photos = append(in.photos, photostore.ImportPhoto{Sha256: hash, SourceMachine: "multichat", SourcePath: sourcePath,
+		Folder: folder, MediaType: mediaType, TakenAt: sentAt.Unix(), DateSource: photostore.DateFromMessage,
+		Width: width, Height: height, ThumbnailJPEG: thumb})
+}
+
+func main() {
+	maxMembers := flag.Int("max-members", 8, "take photos only from chats with at most this many members")
+	archive := flag.String("discord-archive", "", "a multichat-fetch-discord-history output directory whose saved images to import as well")
+	directMessages := flag.String("discord-direct-messages", "", "a multichat-fetch-discord-history direct-messages folder whose saved images to import, cited by journal-store's Discord transcripts")
+	facebookMessages := flag.String("facebook-messages", "", "a Facebook export's your_facebook_activity/messages folder whose photos to import, cited by journal-store's Messenger transcripts")
+	chats := flag.Bool("chats", true, "import the photos in multichat's chats")
+	storeURL := flag.String("store-url", "http://"+photostore.DefaultListenAddress, "photo-store's base URL")
+	dryRun := flag.Bool("dry-run", false, "read everything and post nothing")
+	flag.Parse()
+	settings, err := photostore.NewImportMessagesSettingsRegistry(servicesettings.ProcessEnvironment())
+	if err == nil {
+		err = settings.CheckRequired()
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "photo-import-messages: %v\n", err)
+		os.Exit(2)
+	}
+	chat := multichat{base: settings.String(photostore.SettingMultichatURL), token: settings.String(photostore.SettingMultichatToken),
+		client: &http.Client{Timeout: 2 * time.Minute}}
+	journal := journalStore{base: settings.String(photostore.SettingJournalStoreURL), client: &http.Client{Timeout: time.Minute}}
+	sources := sources{chats: *chats, archive: *archive, directMessages: *directMessages, facebookMessages: *facebookMessages}
+	if err := run(chat, journal, *maxMembers, sources, *storeURL, *dryRun, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "photo-import-messages: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// sources say where to take photos from.
+type sources struct {
+	chats            bool
+	archive          string
+	directMessages   string
+	facebookMessages string
+}
+
+func run(chat multichat, journal journalStore, maxMembers int, from sources, storeURL string, dryRun bool, out io.Writer) error {
+	in := &importer{seen: map[string]bool{}, report: map[string]int{}}
+	if from.chats {
+		if err := importChats(chat, in, maxMembers, out); err != nil {
+			return err
+		}
+	}
+	if from.archive != "" {
+		if err := importArchive(chat, in, from.archive); err != nil {
+			return err
+		}
+	}
+	if from.directMessages != "" {
+		if err := importDirectMessages(journal, in, from.directMessages); err != nil {
+			return err
+		}
+	}
+	if from.facebookMessages != "" {
+		if err := importFacebookMessages(journal, in, from.facebookMessages, maxMembers); err != nil {
+			return err
+		}
+	}
+	return post(in, storeURL, dryRun, out)
+}
+
+func importChats(chat multichat, in *importer, maxMembers int, out io.Writer) error {
+	body, err := chat.get("/conversations", nil)
+	if err != nil {
+		return err
+	}
+	var conversations []conversation
+	if err := json.Unmarshal(body, &conversations); err != nil {
+		return err
+	}
+	for _, room := range conversations {
+		if room.MemberCount > maxMembers || (room.Platform == "discord" && strings.HasPrefix(room.Name, "#")) {
+			continue
+		}
+		messages, err := chat.messages(url.Values{"room_id": {room.RoomID}})
+		if err != nil {
+			return fmt.Errorf("room %s: %w", room.RoomID, err)
+		}
+		for _, message := range messages {
+			if !strings.HasPrefix(message.MediaMimetype, "image/") || message.MediaURL == "" || message.RedactedAt != nil {
+				continue
+			}
+			original, err := chat.media(message.MediaURL)
+			if err != nil {
+				in.report["the file is gone from the homeserver"]++
+				continue
+			}
+			in.add(original, message.MediaMimetype, message.Ref, "messages/"+message.Platform+"/"+message.RoomName, message.SentAt)
+		}
+	}
+	fmt.Fprintf(out, "chats: %d photos so far\n", len(in.photos))
+	return nil
+}
+
+func post(in *importer, storeURL string, dryRun bool, out io.Writer) error {
+	for reason, count := range in.report {
+		fmt.Fprintf(out, "skipped %d: %s\n", count, reason)
+	}
+	fmt.Fprintf(out, "read %d photos\n", len(in.photos))
+	if dryRun {
+		fmt.Fprintln(out, "dry run: nothing posted")
+		return nil
+	}
+	var total photostore.ImportResult
+	client := &http.Client{Timeout: 5 * time.Minute}
+	for start := 0; start < len(in.photos); start += 50 {
+		batch := in.photos[start:min(start+50, len(in.photos))]
+		payload, err := json.Marshal(photostore.ImportRequest{Photos: batch})
+		if err != nil {
+			return err
+		}
+		response, err := client.Post(storeURL+"/imports", "application/json", bytes.NewReader(payload))
+		if err != nil {
+			return fmt.Errorf("photos %d–%d: %w (the batches before it were written)", start+1, start+len(batch), err)
+		}
+		answer, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return fmt.Errorf("photos %d–%d: photo-store answered %d: %s", start+1, start+len(batch), response.StatusCode, bytes.TrimSpace(answer))
+		}
+		var result photostore.ImportResult
+		if err := json.Unmarshal(answer, &result); err != nil {
+			return err
+		}
+		total.Created += result.Created
+		total.Updated += result.Updated
+		total.Skipped += result.Skipped
+	}
+	fmt.Fprintf(out, "imported: created %d, updated %d, unchanged %d\n", total.Created, total.Updated, total.Skipped)
+	return nil
+}
+
+// importArchive adds the images multichat-fetch-discord-history saved, each
+// cited by the message log row the archive import made for its message.
+func importArchive(chat multichat, in *importer, archive string) error {
+	manifests, err := filepath.Glob(filepath.Join(archive, "*", "images.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, manifest := range manifests {
+		server := filepath.Base(filepath.Dir(manifest))
+		if server == directMessagesFolder {
+			continue // -discord-direct-messages reads it
+		}
+		logged, err := chat.messages(url.Values{"network_id": {server}})
+		if err != nil {
+			return fmt.Errorf("server %s: %w", server, err)
+		}
+		byDiscordID := map[string]loggedMessage{}
+		for _, message := range logged {
+			if message.DiscordMessageID != "" {
+				byDiscordID[message.DiscordMessageID] = message
+			}
+		}
+		file, err := os.Open(manifest)
+		if err != nil {
+			return err
+		}
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			var line struct {
+				MessageID   string `json:"message_id"`
+				ContentType string `json:"content_type"`
+				Path        string `json:"path"`
+			}
+			if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+				file.Close()
+				return fmt.Errorf("%s: %w", manifest, err)
+			}
+			message, known := byDiscordID[line.MessageID]
+			if !known {
+				in.report["its message is not in the message log (import the archive first)"]++
+				continue
+			}
+			original, err := os.ReadFile(filepath.Join(filepath.Dir(manifest), line.Path))
+			if err != nil {
+				file.Close()
+				return err
+			}
+			in.add(original, line.ContentType, message.Ref, "discord/"+message.NetworkName+"/"+message.ChannelName, message.SentAt)
+		}
+		file.Close()
+		if err := scanner.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
