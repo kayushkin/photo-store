@@ -54,6 +54,7 @@ def main():
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--threads", type=int, default=2, help="CPU threads for the model")
     parser.add_argument("--limit", type=int, default=0, help="stop after this many photos; 0 = all")
+    parser.add_argument("--photo", action="append", default=[], help="scan only this photo id, ahead of the queue; repeatable")
     arguments = parser.parse_args()
 
     import onnxruntime
@@ -65,12 +66,18 @@ def main():
 
     done = 0
     skipped = set()
+    named_scanned = False
     while True:
-        status, body = call(arguments.store_url, "GET", f"/face-scans/pending?model={MODEL}&limit=1000")
-        if status != 200:
-            sys.exit(f"pending: {status} {body[:300]!r}")
-        mine = [photo_id for photo_id in json.loads(body)
-                if int(photo_id.split("_")[1]) % arguments.workers == arguments.worker and photo_id not in skipped]
+        if arguments.photo:
+            if named_scanned:
+                break
+            mine, named_scanned = arguments.photo, True
+        else:
+            status, body = call(arguments.store_url, "GET", f"/face-scans/pending?model={MODEL}&limit=1000")
+            if status != 200:
+                sys.exit(f"pending: {status} {body[:300]!r}")
+            mine = [photo_id for photo_id in json.loads(body)
+                    if int(photo_id.split("_")[1]) % arguments.workers == arguments.worker and photo_id not in skipped]
         if not mine:
             break
         for photo_id in mine:
@@ -90,6 +97,10 @@ def main():
                     "embedding_float32_base64": base64.b64encode(np.asarray(face.embedding, dtype="<f4").tobytes()).decode(),
                 })
             status, answer = call(arguments.store_url, "POST", "/face-scans", {"photo_id": photo_id, "model": MODEL, "faces": faces})
+            if status == 409:
+                # Another finder scanned it meanwhile; its faces stand.
+                skipped.add(photo_id)
+                continue
             if status != 201:
                 sys.exit(f"{photo_id}: POST /face-scans {status} {answer[:300]!r}")
             done += 1
