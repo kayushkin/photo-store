@@ -12,11 +12,16 @@ const (
 	// DateFromUpload is when the photo was posted to a site such as
 	// Facebook: it was taken then or before.
 	DateFromUpload = "upload"
-	DateUnknown    = "unknown"
+	// DateFromGooglePhotos is Google Photos' own record of when the photo
+	// was taken (photoTakenTime in a Takeout sidecar). Google usually read it
+	// from the camera before the file lost it, but for a file with no camera
+	// date it is when the file reached Google, so it is weaker than exif.
+	DateFromGooglePhotos = "google_photos"
+	DateUnknown          = "unknown"
 )
 
 // DateSources is every date source a photo can have.
-var DateSources = []string{DateFromExif, DateFromFilename, DateFromMtime, DateFromMessage, DateFromUpload, DateUnknown}
+var DateSources = []string{DateFromExif, DateFromFilename, DateFromMtime, DateFromMessage, DateFromUpload, DateFromGooglePhotos, DateUnknown}
 
 func knownDateSource(source string) bool {
 	for _, known := range DateSources {

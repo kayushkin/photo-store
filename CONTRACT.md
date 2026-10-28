@@ -24,7 +24,7 @@ file 0600).
 | `folder` | the collection it came from (`Pictures/Camera`) |
 | `media_type` | `image/jpeg`, `video/mp4`… |
 | `taken_at` | epoch seconds; 0 only with `date_source` `unknown` |
-| `date_source` | `GET /date-sources`: `exif` (camera), `filename`, `mtime` (weak: copies reset it), `message` (when it was sent in a chat: taken then or before), `upload` (when it was posted to a site such as Facebook: taken then or before), `unknown` |
+| `date_source` | `GET /date-sources`: `exif` (camera), `filename`, `mtime` (weak: copies reset it), `message` (when it was sent in a chat: taken then or before), `upload` (when it was posted to a site such as Facebook: taken then or before), `google_photos` (Google Photos' own record of when it was taken, from a Takeout sidecar: usually the camera's time, weaker than `exif`), `unknown` |
 | `latitude`, `longitude` | both or neither; null when the file has no GPS |
 | `width`, `height` | of the original |
 | `description` | markdown; `[text](ref:<id>)` links name people and events |
@@ -38,7 +38,7 @@ file 0600).
 |---|---|---|
 | `GET` | `/health` | `{status, counts:{photos, described, with_gps, deleted, revisions}}` |
 | `GET` | `/settings` | the declared settings |
-| `GET` | `/date-sources` | `["exif","filename","mtime","message","upload","unknown"]` |
+| `GET` | `/date-sources` | `["exif","filename","mtime","message","upload","google_photos","unknown"]` |
 | `GET` | `/tags` | every tag on a live photo with how many live photos carry it, most used first: `[{tag, photos}]` |
 | `POST` | `/face-scans` | `{photo_id, model, faces:[{box:{left,top,right,bottom}, detection_score, embedding_float32_base64}]}`: what one face model found on one photo's thumbnail, all or nothing; an empty `faces` records that it found none. Boxes are fractions of the thumbnail, up to 0.5 past an edge. The embedding is stored normalised to length 1. A photo already scanned by the model is a **409**, so a face id keeps meaning one face. **201** with the faces |
 | `GET` | `/face-scans/pending` | `?model=` (required) `&limit=`: ids of live, unpurged images that model has not scanned, oldest first |
