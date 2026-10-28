@@ -75,5 +75,5 @@ with at most `-max-members` members, never a Discord server channel, plus with
 saved. Each photo's `source_machine` is `multichat`, its `source_path` the
 `message_…` ref it came in (a chip), its `folder` `messages/<platform>/<room>`
 or `discord/<server>/<channel>`, and its date when it was sent
-(`date_source` `message`). Thumbnails are made in Go (`internal/thumbnail`:
+(`date_source` `message`). Thumbnails are made in Go (package `thumbnail`, public so another repo's importer makes the same ones:
 JPEG, PNG, GIF, WebP; longest side 1024, quality 80).

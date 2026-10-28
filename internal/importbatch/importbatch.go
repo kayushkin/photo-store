@@ -14,7 +14,7 @@ import (
 	"time"
 
 	photostore "github.com/kayushkin/photo-store"
-	"github.com/kayushkin/photo-store/internal/thumbnail"
+	"github.com/kayushkin/photo-store/thumbnail"
 )
 
 // Batch is the photos read so far.
