@@ -5,7 +5,10 @@
 // multichat-fetch-discord-history saved from the user's own servers, with
 // -discord-direct-messages the ones it saved from the user's DMs, and with
 // -facebook-messages the photos in a Facebook export's Messenger chats of at
-// most -max-members people. A DM or Messenger photo is cited by the
+// most -max-members people. -room imports one named multichat room whatever
+// its size, Discord server channels included, for a room the user chose; a
+// Discord channel's photos go under discord/<server>/<channel>, as archive
+// images do. A DM or Messenger photo is cited by the
 // journal-store transcript of the day it was sent, found by its Discord
 // message id or file name; -chats=false skips multichat's own chats. Each photo's
 // source is the message it came in (its message_ ref), and its date is when
@@ -135,6 +138,8 @@ func main() {
 	directMessages := flag.String("discord-direct-messages", "", "a multichat-fetch-discord-history direct-messages folder whose saved images to import, cited by journal-store's Discord transcripts")
 	facebookMessages := flag.String("facebook-messages", "", "a Facebook export's your_facebook_activity/messages folder whose photos to import, cited by journal-store's Messenger transcripts")
 	chats := flag.Bool("chats", true, "import the photos in multichat's chats")
+	var rooms roomList
+	flag.Var(&rooms, "room", "a multichat room id whose photos to import whatever its size, Discord server channels included; repeat for more")
 	storeURL := flag.String("store-url", "http://"+photostore.DefaultListenAddress, "photo-store's base URL")
 	dryRun := flag.Bool("dry-run", false, "read everything and post nothing")
 	flag.Parse()
@@ -149,7 +154,7 @@ func main() {
 	chat := multichat{base: settings.String(photostore.SettingMultichatURL), token: settings.String(photostore.SettingMultichatToken),
 		client: &http.Client{Timeout: 2 * time.Minute}}
 	journal := journalcitation.Store{Base: settings.String(photostore.SettingJournalStoreURL), Client: &http.Client{Timeout: time.Minute}}
-	sources := sources{chats: *chats, archive: *archive, directMessages: *directMessages, facebookMessages: *facebookMessages}
+	sources := sources{chats: *chats, rooms: rooms, archive: *archive, directMessages: *directMessages, facebookMessages: *facebookMessages}
 	if err := run(chat, journal, *maxMembers, sources, *storeURL, *dryRun, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "photo-import-messages: %v\n", err)
 		os.Exit(1)
@@ -159,6 +164,7 @@ func main() {
 // sources say where to take photos from.
 type sources struct {
 	chats            bool
+	rooms            []string
 	archive          string
 	directMessages   string
 	facebookMessages string
@@ -168,6 +174,11 @@ func run(chat multichat, journal journalcitation.Store, maxMembers int, from sou
 	in := importbatch.New()
 	if from.chats {
 		if err := importChats(chat, in, maxMembers, out); err != nil {
+			return err
+		}
+	}
+	for _, room := range from.rooms {
+		if err := importRoom(chat, in, room, out); err != nil {
 			return err
 		}
 	}
@@ -202,23 +213,63 @@ func importChats(chat multichat, in *importbatch.Batch, maxMembers int, out io.W
 		if room.MemberCount > maxMembers || (room.Platform == "discord" && strings.HasPrefix(room.Name, "#")) {
 			continue
 		}
-		messages, err := chat.messages(url.Values{"room_id": {room.RoomID}})
-		if err != nil {
-			return fmt.Errorf("room %s: %w", room.RoomID, err)
-		}
-		for _, message := range messages {
-			if !strings.HasPrefix(message.MediaMimetype, "image/") || message.MediaURL == "" || message.RedactedAt != nil {
-				continue
-			}
-			original, err := chat.media(message.MediaURL)
-			if err != nil {
-				in.Report["the file is gone from the homeserver"]++
-				continue
-			}
-			in.Add(original, message.MediaMimetype, multichatMachine, message.Ref, "messages/"+message.Platform+"/"+message.RoomName, message.SentAt, photostore.DateFromMessage)
+		if err := addRoomImages(chat, in, room.RoomID, func(message loggedMessage) string {
+			return "messages/" + message.Platform + "/" + message.RoomName
+		}); err != nil {
+			return err
 		}
 	}
 	fmt.Fprintf(out, "chats: %d photos so far\n", len(in.Photos))
+	return nil
+}
+
+// importRoom adds the images of one room the user named, whatever its size.
+// A Discord server channel's go under discord/<server>/<channel>, where its
+// archive images go; any other room's under messages/<platform>/<room>.
+func importRoom(chat multichat, in *importbatch.Batch, roomID string, out io.Writer) error {
+	if err := addRoomImages(chat, in, roomID, func(message loggedMessage) string {
+		if message.Platform == "discord" && message.NetworkName != "" {
+			return "discord/" + message.NetworkName + "/" + message.ChannelName
+		}
+		return "messages/" + message.Platform + "/" + message.RoomName
+	}); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "room %s: %d photos so far\n", roomID, len(in.Photos))
+	return nil
+}
+
+// addRoomImages adds every image still on the homeserver that was sent in a
+// room, each cited by its message log ref, under the folder folderFor names.
+func addRoomImages(chat multichat, in *importbatch.Batch, roomID string, folderFor func(loggedMessage) string) error {
+	messages, err := chat.messages(url.Values{"room_id": {roomID}})
+	if err != nil {
+		return fmt.Errorf("room %s: %w", roomID, err)
+	}
+	for _, message := range messages {
+		if !strings.HasPrefix(message.MediaMimetype, "image/") || message.MediaURL == "" || message.RedactedAt != nil {
+			continue
+		}
+		original, err := chat.media(message.MediaURL)
+		if err != nil {
+			in.Report["the file is gone from the homeserver"]++
+			continue
+		}
+		in.Add(original, message.MediaMimetype, multichatMachine, message.Ref, folderFor(message), message.SentAt, photostore.DateFromMessage)
+	}
+	return nil
+}
+
+// roomList collects repeated -room flags.
+type roomList []string
+
+func (rooms *roomList) String() string { return strings.Join(*rooms, ",") }
+
+func (rooms *roomList) Set(room string) error {
+	if strings.TrimSpace(room) == "" {
+		return fmt.Errorf("a room id is required")
+	}
+	*rooms = append(*rooms, room)
 	return nil
 }
 
