@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -34,6 +35,10 @@ type modelChecker struct {
 	years        map[string]string // photo id → the year it was taken, "unknown year" when not known
 	thumbnails   map[string]image.Image
 }
+
+// modelVerdictMarker starts the sentence a model check adds to a link's
+// evidence, and marks a link as already asked.
+const modelVerdictMarker = "A model compared the face with"
 
 const modelCheckSchema = `{"type":"object","properties":{"verdict":{"type":"string","enum":["same","different","unsure"]},"reason":{"type":"string"}},"required":["verdict","reason"]}`
 
@@ -196,9 +201,15 @@ func (c *modelChecker) checkSuggestions(links []photostore.PhotoPerson, limit in
 	// The surest suggestions first, so a capped run spends on the likeliest.
 	sort.SliceStable(suggestions, func(i, j int) bool { return suggestions[i].Confidence > suggestions[j].Confidence })
 	outcome := map[string]int{}
+	failedInARow := 0
 	for _, link := range suggestions {
 		if outcome["asked"] >= limit {
 			break
+		}
+		// A suggestion the model already answered "unsure" keeps that
+		// answer in its evidence; asking again would spend a call for it.
+		if strings.Contains(link.Evidence, modelVerdictMarker) {
+			continue
 		}
 		known := confirmedFaces[link.PersonID]
 		comparedWith := "faces confirmed as them"
@@ -217,9 +228,18 @@ func (c *modelChecker) checkSuggestions(links []photostore.PhotoPerson, limit in
 		outcome["asked"]++
 		verdict, err := c.ask(link.FaceID, known, contextWithoutScores(link.Evidence))
 		if err != nil {
-			return outcome, fmt.Errorf("%s: %w", link.ID, err)
+			// One failed call (an overloaded model, a passing limit) skips
+			// this link, loudly; several in a row mean the route is down.
+			outcome["failed"]++
+			failedInARow++
+			fmt.Fprintf(os.Stderr, "%s: model check of %s failed: %v\n", matcherName, link.ID, err)
+			if failedInARow >= 5 {
+				return outcome, fmt.Errorf("five model calls failed in a row; the last: %w", err)
+			}
+			continue
 		}
-		evidence := fmt.Sprintf("%s A model compared the face with %d %s and said %s: %s", link.Evidence, len(known), comparedWith, verdict.Verdict, verdict.Reason)
+		failedInARow = 0
+		evidence := fmt.Sprintf("%s %s %d %s and said %s: %s", link.Evidence, modelVerdictMarker, len(known), comparedWith, verdict.Verdict, verdict.Reason)
 		var change photostore.PhotoPersonDecision
 		decidedBy := fmt.Sprintf("%s: face match and %s agree", matcherName, verdict.Model)
 		switch verdict.Verdict {

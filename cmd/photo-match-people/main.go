@@ -259,7 +259,7 @@ func main() {
 			fail(err)
 		}
 		outcome, err := checker.checkSuggestions(links, *modelCheck, *dryRun)
-		fmt.Printf("model check: asked %d; same %d, different %d, unsure %d\n", outcome["asked"], outcome["same"], outcome["different"], outcome["unsure"])
+		fmt.Printf("model check: asked %d; same %d, different %d, unsure %d, failed %d\n", outcome["asked"], outcome["same"], outcome["different"], outcome["unsure"], outcome["failed"])
 		if err != nil {
 			fail(err)
 		}
