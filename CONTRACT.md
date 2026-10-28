@@ -44,6 +44,7 @@ file 0600).
 | `GET` | `/face-scans/pending` | `?model=` (required) `&limit=`: ids of live, unpurged images that model has not scanned, oldest first |
 | `GET` | `/faces` | faces on live photos in id order: `?photo_id=`, `?model=`, `?after=<face id>` to page, `?include_embeddings=true`, `?limit=` (default and max 5000) |
 | `GET` | `/photos/{id}/faces` | the photo's faces, no embeddings |
+| `GET` | `/faces/{id}/image` | the face cut from its photo's thumbnail with a third of its size around it, a JPEG; a purged photo's is a **410** |
 | `GET` | `/photo-person-statuses` | `["suggested","confirmed","rejected"]` |
 | `GET` | `/photo-people` | who is in which live photo: `?photo_id=`, `?person_id=`, `?status=`, `?limit=`, `?offset=` |
 | `POST` | `/photo-people` | `{photo_id, person_id, face_id, status, confidence, evidence, proposed_by, decided_by}`: `person_id` is people-store's (`person_000001`); `status` is `suggested` or `confirmed`, which needs `decided_by`; `face_id` must be on the photo. For a pair already linked it only moves a suggestion upward: a confirmed or **rejected** link is answered as it stands (200), so no matcher undoes a person's rejection. **201** when created |

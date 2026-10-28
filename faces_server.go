@@ -1,8 +1,13 @@
 package photostore
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"image"
+	jpegcodec "image/jpeg"
 	"net/http"
+	"os"
 )
 
 func registerFaceHandlers(mux *http.ServeMux, h *handler) {
@@ -10,6 +15,7 @@ func registerFaceHandlers(mux *http.ServeMux, h *handler) {
 	mux.HandleFunc("GET /face-scans/pending", h.photosNotScanned)
 	mux.HandleFunc("GET /faces", h.faces)
 	mux.HandleFunc("GET /photos/{id}/faces", h.facesOfPhoto)
+	mux.HandleFunc("GET /faces/{id}/image", h.faceImage)
 	mux.HandleFunc("GET /photo-person-statuses", h.photoPersonStatuses)
 	mux.HandleFunc("GET /photo-people", h.photoPeople)
 	mux.HandleFunc("POST /photo-people", h.proposePhotoPerson)
@@ -130,4 +136,58 @@ func (h *handler) peopleCounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, counts)
+}
+
+// faceImage answers GET /faces/{id}/image: the face cut from its photo's
+// thumbnail with a third of its size around it, as a JPEG, so a page or a
+// model sees the face and a little of the head.
+func (h *handler) faceImage(w http.ResponseWriter, r *http.Request) {
+	face, err := h.s.FaceByID(r.PathValue("id"))
+	if respondError(w, err) {
+		return
+	}
+	photo, err := h.s.Get(face.PhotoID, true)
+	if respondError(w, err) {
+		return
+	}
+	if photo.PurgedAt != 0 {
+		writeErr(w, http.StatusGone, fmt.Sprintf("photo %s was purged: its faces are gone for good", photo.ID))
+		return
+	}
+	file, err := os.Open(h.s.ThumbnailPath(photo.Sha256))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("photo %s has no thumbnail on disk: %v", photo.ID, err))
+		return
+	}
+	defer file.Close()
+	picture, err := jpegcodec.Decode(file)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("thumbnail of %s: %v", photo.ID, err))
+		return
+	}
+	crop := FaceCrop(picture.Bounds(), face.Box)
+	cropper, ok := picture.(interface {
+		SubImage(image.Rectangle) image.Image
+	})
+	if crop.Empty() || !ok {
+		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("%s cannot be cut from its thumbnail", face.ID))
+		return
+	}
+	var encoded bytes.Buffer
+	if err := jpegcodec.Encode(&encoded, cropper.SubImage(crop), &jpegcodec.Options{Quality: 88}); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	w.Write(encoded.Bytes())
+}
+
+// FaceCrop is the rectangle of a thumbnail a face is cut from: its box with
+// a third of its width and height around it, kept inside the thumbnail.
+func FaceCrop(bounds image.Rectangle, box FaceBox) image.Rectangle {
+	width, height := float64(bounds.Dx()), float64(bounds.Dy())
+	marginX, marginY := (box.Right-box.Left)*0.3, (box.Bottom-box.Top)*0.3
+	return image.Rect(bounds.Min.X+int((box.Left-marginX)*width), bounds.Min.Y+int((box.Top-marginY)*height),
+		bounds.Min.X+int((box.Right+marginX)*width), bounds.Min.Y+int((box.Bottom+marginY)*height)).Intersect(bounds)
 }

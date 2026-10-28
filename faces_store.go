@@ -455,3 +455,14 @@ func (s *Store) PeopleCounts() ([]PersonPhotoCount, error) {
 	}
 	return counts, rows.Err()
 }
+
+// FaceByID answers one face, without its embedding.
+func (s *Store) FaceByID(id string) (Face, error) {
+	var face Face
+	err := s.db.QueryRow(`SELECT id, photo_id, model, box_left, box_top, box_right, box_bottom, detection_score, created_at FROM faces WHERE id = ?`, id).
+		Scan(&face.ID, &face.PhotoID, &face.Model, &face.Box.Left, &face.Box.Top, &face.Box.Right, &face.Box.Bottom, &face.DetectionScore, &face.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Face{}, fmt.Errorf("%w: no face %s", ErrNotFound, id)
+	}
+	return face, err
+}

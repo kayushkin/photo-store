@@ -1,8 +1,11 @@
 package photostore
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"image"
+	jpegcodec "image/jpeg"
 	"math"
 	"net/http"
 	"testing"
@@ -16,9 +19,23 @@ func embeddingOf(values ...float32) string {
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
+// realJPEG is a small grey picture a face can be cut from, unlike the
+// placeholder bytes most tests import as a thumbnail.
+func realJPEG(t *testing.T) []byte {
+	t.Helper()
+	picture := image.NewGray(image.Rect(0, 0, 200, 150))
+	var encoded bytes.Buffer
+	if err := jpegcodec.Encode(&encoded, picture, nil); err != nil {
+		t.Fatal(err)
+	}
+	return encoded.Bytes()
+}
+
 func TestAFaceScanIsKeptOnceAndItsEmbeddingNormalised(t *testing.T) {
 	service := newTestService(t)
-	service.call(http.MethodPost, "/imports", ImportRequest{Photos: []ImportPhoto{photoOf("n", 100), photoOf("o", 200)}}, nil)
+	withPicture := photoOf("n", 100)
+	withPicture.ThumbnailJPEG = realJPEG(t)
+	service.call(http.MethodPost, "/imports", ImportRequest{Photos: []ImportPhoto{withPicture, photoOf("o", 200)}}, nil)
 
 	var pending []string
 	service.call(http.MethodGet, "/face-scans/pending?model=test-model", nil, &pending)
@@ -58,6 +75,12 @@ func TestAFaceScanIsKeptOnceAndItsEmbeddingNormalised(t *testing.T) {
 	first := math.Float32frombits(binary.LittleEndian.Uint32(raw))
 	if math.Abs(float64(first)-0.6) > 1e-6 {
 		t.Errorf("the stored embedding starts %v, want 0.6: (3, 4) normalised", first)
+	}
+	if status, image := service.call(http.MethodGet, "/faces/face_000001/image", nil, nil); status != http.StatusOK || len(image) < 2 || image[0] != 0xFF || image[1] != 0xD8 {
+		t.Errorf("GET /faces/face_000001/image = %d, %d bytes; want a JPEG", status, len(image))
+	}
+	if status, _ := service.call(http.MethodGet, "/faces/face_000099/image", nil, nil); status != http.StatusNotFound {
+		t.Errorf("an unknown face's image = %d, want 404", status)
 	}
 	var withoutEmbeddings []Face
 	service.call(http.MethodGet, "/photos/photo_000001/faces", nil, &withoutEmbeddings)
