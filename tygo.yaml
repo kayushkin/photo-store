@@ -1,7 +1,7 @@
 # TypeScript types generated from this store's Go wire types. The Go structs
 # are the source of truth; ts/ is a render of them. Regenerate with
-# ./generate-ts.sh after changing a wire type. Only photo.go and vocabulary.go
-# hold wire types.
+# ./generate-ts.sh after changing a wire type. Only photo.go, vocabulary.go and
+# people_on_photos.go hold wire types.
 packages:
   - path: "github.com/kayushkin/photo-store"
     output_path: "ts/model.ts"
@@ -10,3 +10,5 @@ packages:
       - "server.go"
       - "settings.go"
       - "schema_embed.go"
+      - "faces_store.go"
+      - "faces_server.go"

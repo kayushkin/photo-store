@@ -373,6 +373,7 @@ type Filter struct {
 	Folder         string
 	Query          string // words that must all appear in the description or tags
 	Tag            string
+	Person         string // a person_ id confirmed in the photo
 	Described      string // "true", "false" or ""
 	HasGPS         bool
 	IncludeDeleted bool
@@ -412,6 +413,10 @@ func (s *Store) List(filter Filter) ([]Photo, error) {
 	if filter.Tag != "" {
 		where = append(where, "EXISTS (SELECT 1 FROM json_each(photos.tags) WHERE value = ?)")
 		args = append(args, filter.Tag)
+	}
+	if filter.Person != "" {
+		where = append(where, "EXISTS (SELECT 1 FROM photo_people WHERE photo_people.photo_id = photos.id AND photo_people.person_id = ? AND photo_people.status = 'confirmed')")
+		args = append(args, filter.Person)
 	}
 	switch filter.Described {
 	case "true":

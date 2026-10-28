@@ -29,6 +29,7 @@ func RegisterHandlers(mux *http.ServeMux, s *Store) {
 	mux.HandleFunc("POST /photos/{id}/purge", h.purge)
 	mux.HandleFunc("GET /photos/{id}/revisions", h.revisions)
 	mux.HandleFunc("GET /photos/{id}/thumbnail", h.thumbnail)
+	registerFaceHandlers(mux, h)
 }
 
 type handler struct {
@@ -73,7 +74,7 @@ func integerParameter(w http.ResponseWriter, r *http.Request, name string) (int6
 
 func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
-	filter := Filter{Folder: query.Get("folder"), Query: query.Get("q"), Tag: query.Get("tag"), Described: query.Get("described"),
+	filter := Filter{Folder: query.Get("folder"), Query: query.Get("q"), Tag: query.Get("tag"), Person: query.Get("person"), Described: query.Get("described"),
 		HasGPS: query.Get("has_gps") == "true", IncludeDeleted: query.Get("include_deleted") == "true"}
 	var ok bool
 	if filter.From, ok = integerParameter(w, r, "from"); !ok {
