@@ -386,14 +386,28 @@ func run(web client, config settings, operator, model, seedPerson, seedPhotos, s
 	}
 
 	// Then: for each person the context names who has no confirmed face, the
-	// face that recurs across their photos, leaving out faces of people
-	// already known.
+	// face that recurs across their one-to-one photos, leaving out faces of
+	// people already known and faces already linked to anyone.
+	// Only photos whose context names one person besides the operator: in a
+	// group chat the face that recurs is one member's, and nothing here says
+	// whose, so a cluster there would be suggested as every member.
 	photosOfPerson := map[string][]string{}
 	for photoID, named := range contextOf {
+		var others []string
 		for personID := range named {
 			if personID != operator {
-				photosOfPerson[personID] = append(photosOfPerson[personID], photoID)
+				others = append(others, personID)
 			}
+		}
+		if len(others) == 1 {
+			photosOfPerson[others[0]] = append(photosOfPerson[others[0]], photoID)
+		}
+	}
+	// A face already linked to someone, any status, is not offered again.
+	claimedFaces := map[string]bool{}
+	for _, link := range linked {
+		if link.FaceID != "" {
+			claimedFaces[link.FaceID] = true
 		}
 	}
 	people := make([]string, 0, len(photosOfPerson))
@@ -408,6 +422,9 @@ func run(web client, config settings, operator, model, seedPerson, seedPhotos, s
 		var candidates []peoplematching.Face
 		for _, photoID := range photosOfPerson[personID] {
 			for _, face := range facesByPhoto[photoID] {
+				if claimedFaces[face.ID] {
+					continue
+				}
 				if scores := peoplematching.ScorePeople(face, known); len(scores) > 0 && scores[0].Similarity >= peoplematching.SuggestSimilarity {
 					continue
 				}
@@ -416,6 +433,7 @@ func run(web client, config settings, operator, model, seedPerson, seedPhotos, s
 		}
 		cluster := peoplematching.ClusterInContext(candidates)
 		for _, face := range cluster {
+			claimedFaces[face.ID] = true
 			if err := propose(photostore.PhotoPersonProposal{PhotoID: face.PhotoID, PersonID: personID, FaceID: face.ID, Status: photostore.PhotoPersonSuggested,
 				Confidence: 0.5, ProposedBy: matcherName,
 				Evidence: fmt.Sprintf("The same face recurs on %d photos whose chats name [them](ref:%s); this photo was %s.", len(cluster), personID, contextOf[face.PhotoID][personID])}); err != nil {
