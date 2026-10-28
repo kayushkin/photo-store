@@ -10,11 +10,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/kayushkin/llm-bridge/msg"
 	photostore "github.com/kayushkin/photo-store"
+	"github.com/kayushkin/photo-store/internal/peoplematching"
 )
 
 // modelChecker asks a model that can see whether a suggested face is the
@@ -27,6 +30,8 @@ type modelChecker struct {
 	serviceToken string
 	role         string
 	faces        map[string]photostore.Face // id → face with its box
+	embeddings   map[string][]float32
+	years        map[string]string // photo id → the year it was taken, "unknown year" when not known
 	thumbnails   map[string]image.Image
 }
 
@@ -34,9 +39,11 @@ const modelCheckSchema = `{"type":"object","properties":{"verdict":{"type":"stri
 
 const modelCheckSystemPrompt = `You compare faces in a private family photo archive, for its owner. ` +
 	`The first image is one face cut from a photo. The others are faces already confirmed as one person. ` +
-	`Say "same" only if the first face is clearly that person, "different" if it is clearly someone else, ` +
-	`and "unsure" when the face is too small, blurred, turned away, or a different age makes it hard to tell. ` +
-	`Judge by the face, not clothes or setting. Give a one-sentence reason.`
+	`Each image comes with the year its photo was taken. The archive spans many years, so the person may be ` +
+	`a child or teenager in one photo and an adult in another, with or without glasses, a beard or a moustache. ` +
+	`Judge by what lasts: eye shape and spacing, nose, brows, ears, and the structure of the face. ` +
+	`Say "same" when those clearly match allowing for age, "different" when they clearly do not, and "unsure" only ` +
+	`when the face is too small, blurred or turned away to see them. Give a one-sentence reason.`
 
 func (c *modelChecker) thumbnail(photoID string) (image.Image, error) {
 	if cached, seen := c.thumbnails[photoID]; seen {
@@ -115,7 +122,12 @@ func (c *modelChecker) ask(faceID string, knownFaceIDs []string, context string)
 		}
 		images = append(images, crop)
 	}
-	prompt := fmt.Sprintf("Image 1 is the face to judge. Images 2 to %d are the person it may be.", len(images))
+	years := make([]string, 0, len(images))
+	for _, id := range append([]string{faceID}, knownFaceIDs...) {
+		years = append(years, c.yearOf(c.faces[id].PhotoID))
+	}
+	prompt := fmt.Sprintf("Image 1 is the face to judge. Images 2 to %d are the person it may be. The photos were taken in, in order: %s.",
+		len(images), strings.Join(years, ", "))
 	if context != "" {
 		prompt += " What the archive knows about where the photo came from: " + context
 	}
@@ -201,9 +213,9 @@ func (c *modelChecker) checkSuggestions(links []photostore.PhotoPerson, limit in
 		if len(known) == 0 {
 			continue
 		}
-		known = known[:min(3, len(known))]
+		known = c.mostSimilar(link.FaceID, known, 3)
 		outcome["asked"]++
-		verdict, err := c.ask(link.FaceID, known, markdownToPlain(link.Evidence))
+		verdict, err := c.ask(link.FaceID, known, contextWithoutScores(link.Evidence))
 		if err != nil {
 			return outcome, fmt.Errorf("%s: %w", link.ID, err)
 		}
@@ -255,11 +267,12 @@ func (c *modelChecker) patch(id string, change photostore.PhotoPersonDecision) e
 	return nil
 }
 
-// loadFaceBoxes reads every face's box, which the crops need.
+// loadFaceBoxes reads every face's box, which the crops need, and its
+// embedding, which picks the known faces most like it.
 func (c *modelChecker) loadFaceBoxes(model string) error {
 	after := ""
 	for {
-		query := url.Values{"model": {model}, "limit": {"5000"}}
+		query := url.Values{"model": {model}, "limit": {"5000"}, "include_embeddings": {"true"}}
 		if after != "" {
 			query.Set("after", after)
 		}
@@ -268,6 +281,12 @@ func (c *modelChecker) loadFaceBoxes(model string) error {
 			return fmt.Errorf("faces: %w", err)
 		}
 		for _, face := range page {
+			embedding, err := peoplematching.DecodeEmbedding(face.EmbeddingFloat32Base64)
+			if err != nil {
+				return fmt.Errorf("%s: %w", face.ID, err)
+			}
+			c.embeddings[face.ID] = embedding
+			face.EmbeddingFloat32Base64 = ""
 			c.faces[face.ID] = face
 		}
 		if len(page) < 5000 {
@@ -275,4 +294,37 @@ func (c *modelChecker) loadFaceBoxes(model string) error {
 		}
 		after = page[len(page)-1].ID
 	}
+}
+
+// mostSimilar picks the known faces closest to a face, so the model compares
+// it with the person as they looked nearest to it, not their first photos.
+func (c *modelChecker) mostSimilar(faceID string, known []string, count int) []string {
+	ranked := append([]string(nil), known...)
+	sort.SliceStable(ranked, func(i, j int) bool {
+		return peoplematching.Similarity(c.embeddings[faceID], c.embeddings[ranked[i]]) >
+			peoplematching.Similarity(c.embeddings[faceID], c.embeddings[ranked[j]])
+	})
+	return ranked[:min(count, len(ranked))]
+}
+
+// yearOf answers the year a photo was taken, read once from photo-store.
+func (c *modelChecker) yearOf(photoID string) string {
+	if year, seen := c.years[photoID]; seen {
+		return year
+	}
+	year := "unknown year"
+	var photo photostore.Photo
+	if err := c.web.getJSON(c.storeURL+"/photos/"+url.PathEscape(photoID), nil, &photo); err == nil && photo.TakenAt > 0 {
+		year = time.Unix(photo.TakenAt, 0).UTC().Format("2006")
+	}
+	c.years[photoID] = year
+	return year
+}
+
+var similarityInEvidence = regexp.MustCompile(` ?\(similarity [0-9.]+\)`)
+
+// contextWithoutScores is a link's evidence for the prompt: plain text, no
+// chips, and no similarity score, which a model reads as a verdict of its own.
+func contextWithoutScores(evidence string) string {
+	return similarityInEvidence.ReplaceAllString(markdownToPlain(evidence), "")
 }

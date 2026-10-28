@@ -249,7 +249,8 @@ func main() {
 			fail(fmt.Errorf("-model-check needs LLMBRIDGE_SERVICE_TOKEN: POST /oneshot answers nothing without it"))
 		}
 		checker := &modelChecker{web: web, storeURL: config.storeURL, bridgeURL: strings.TrimRight(registry.String(photostore.SettingBridgeURL), "/"),
-			serviceToken: token, role: *modelRole, faces: map[string]photostore.Face{}, thumbnails: map[string]image.Image{}}
+			serviceToken: token, role: *modelRole, faces: map[string]photostore.Face{}, embeddings: map[string][]float32{},
+			years: map[string]string{}, thumbnails: map[string]image.Image{}}
 		if err := checker.loadFaceBoxes(*model); err != nil {
 			fail(err)
 		}
