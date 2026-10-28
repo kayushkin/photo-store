@@ -376,6 +376,7 @@ type Filter struct {
 	Person         string // a person_ id confirmed in the photo
 	Described      string // "true", "false" or ""
 	HasGPS         bool
+	Sha256         string // the original file's hash: at most one photo
 	IncludeDeleted bool
 	Limit          int
 	Offset         int
@@ -429,6 +430,10 @@ func (s *Store) List(filter Filter) ([]Photo, error) {
 	}
 	if filter.HasGPS {
 		where = append(where, "latitude IS NOT NULL")
+	}
+	if filter.Sha256 != "" {
+		where = append(where, "sha256 = ?")
+		args = append(args, strings.ToLower(filter.Sha256))
 	}
 	query := `SELECT ` + photoColumns + ` FROM photos`
 	if len(where) > 0 {

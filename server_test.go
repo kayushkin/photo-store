@@ -144,14 +144,17 @@ func TestListFiltersByTimeFolderWordsAndPlace(t *testing.T) {
 		return strings.Join(ids, ",")
 	}
 	for path, want := range map[string]string{
-		"/photos":                       "photo_000001,photo_000002,photo_000003",
-		"/photos?from=150&to=300":       "photo_000002",
-		"/photos?folder=Pictures/Phone": "photo_000002",
-		"/photos?q=skating+100%25":      "photo_000003",
-		"/photos?q=50%25":               "",
-		"/photos?tag=skating":           "photo_000003",
-		"/photos?described=false":       "photo_000001,photo_000002",
-		"/photos?has_gps=true":          "photo_000003",
+		"/photos":                                         "photo_000001,photo_000002,photo_000003",
+		"/photos?from=150&to=300":                         "photo_000002",
+		"/photos?folder=Pictures/Phone":                   "photo_000002",
+		"/photos?q=skating+100%25":                        "photo_000003",
+		"/photos?q=50%25":                                 "",
+		"/photos?tag=skating":                             "photo_000003",
+		"/photos?described=false":                         "photo_000001,photo_000002",
+		"/photos?has_gps=true":                            "photo_000003",
+		"/photos?sha256=" + place.Sha256:                  "photo_000003",
+		"/photos?sha256=" + strings.ToUpper(other.Sha256): "photo_000002",
+		"/photos?sha256=" + strings.Repeat("0", 64):       "",
 	} {
 		if got := titles(path); got != want {
 			t.Errorf("%s = %q, want %q", path, got, want)
