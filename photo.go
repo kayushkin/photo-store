@@ -83,6 +83,12 @@ type Revision struct {
 	Photo      Photo  `json:"photo"`
 }
 
+// TagCount is one row of GET /tags: a tag and how many live photos carry it.
+type TagCount struct {
+	Tag    string `json:"tag"`
+	Photos int    `json:"photos"`
+}
+
 // Counts is what GET /health counts.
 type Counts struct {
 	Photos    int `json:"photos"`

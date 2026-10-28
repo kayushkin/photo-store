@@ -39,6 +39,7 @@ file 0600).
 | `GET` | `/health` | `{status, counts:{photos, described, with_gps, deleted, revisions}}` |
 | `GET` | `/settings` | the declared settings |
 | `GET` | `/date-sources` | `["exif","filename","mtime","message","upload","unknown"]` |
+| `GET` | `/tags` | every tag on a live photo with how many live photos carry it, most used first: `[{tag, photos}]` |
 | `GET` | `/photos` | live photos, oldest taken first. `?from=` (inclusive) `&to=` (exclusive) on `taken_at`, `?folder=`, `?q=` (every word in the description or tags), `?tag=`, `?described=true|false`, `?has_gps=true`, `?include_deleted=true`, `?limit=` (default 100, max 1000), `?offset=` |
 | `POST` | `/imports` | `{"photos":[ImportPhoto…]}` with `thumbnail_jpeg` as base64. Upsert by `sha256`: new is created, known with the same facts is skipped, known with other facts is updated after a revision. **Description and tags are never touched by an import.** One bad photo is a 400 naming its index and writes nothing |
 | `GET` | `/photos/{id}` | deleted is 404 unless `?include_deleted=true` |

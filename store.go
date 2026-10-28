@@ -345,6 +345,26 @@ func writeFileAtomically(path string, content []byte) error {
 	return os.Rename(temporary, path)
 }
 
+// TagCounts answers GET /tags: every tag on a live photo, with how many live
+// photos carry it, the most used first and ties by name.
+func (s *Store) TagCounts() ([]TagCount, error) {
+	rows, err := s.db.Query(`SELECT tag.value, COUNT(*) FROM photos, json_each(photos.tags) AS tag
+		WHERE photos.deleted_at = 0 GROUP BY tag.value ORDER BY COUNT(*) DESC, tag.value`)
+	if err != nil {
+		return nil, fmt.Errorf("count tags: %w", err)
+	}
+	defer rows.Close()
+	counts := []TagCount{}
+	for rows.Next() {
+		var count TagCount
+		if err := rows.Scan(&count.Tag, &count.Photos); err != nil {
+			return nil, fmt.Errorf("count tags: %w", err)
+		}
+		counts = append(counts, count)
+	}
+	return counts, rows.Err()
+}
+
 // Filter selects photos for GET /photos. The zero value lists live photos,
 // oldest taken first.
 type Filter struct {

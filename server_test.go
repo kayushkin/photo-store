@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -158,6 +159,28 @@ func TestListFiltersByTimeFolderWordsAndPlace(t *testing.T) {
 	}
 	if status, _ := service.call(http.MethodGet, "/photos?described=maybe", nil, nil); status != http.StatusBadRequest {
 		t.Errorf("described=maybe = %d, want 400", status)
+	}
+}
+
+func TestTagsAreCountedOverLivePhotosMostUsedFirst(t *testing.T) {
+	service := newTestService(t)
+	var none []TagCount
+	if service.call(http.MethodGet, "/tags", nil, &none); none == nil || len(none) != 0 {
+		t.Fatalf("an empty store's tags = %#v, want an empty list, not null", none)
+	}
+	service.call(http.MethodPost, "/imports", ImportRequest{Photos: []ImportPhoto{photoOf("k", 100), photoOf("l", 200), photoOf("m", 300)}}, nil)
+	service.call(http.MethodPatch, "/photos/photo_000001", map[string]any{"tags": []string{"slava", "beach"}}, nil)
+	service.call(http.MethodPatch, "/photos/photo_000002", map[string]any{"tags": []string{"slava"}}, nil)
+	service.call(http.MethodPatch, "/photos/photo_000003", map[string]any{"tags": []string{"slava", "snow"}}, nil)
+	service.call(http.MethodDelete, "/photos/photo_000003", nil, nil)
+
+	var counts []TagCount
+	if status, body := service.call(http.MethodGet, "/tags", nil, &counts); status != http.StatusOK {
+		t.Fatalf("GET /tags = %d %s", status, body)
+	}
+	want := []TagCount{{Tag: "slava", Photos: 2}, {Tag: "beach", Photos: 1}}
+	if fmt.Sprint(counts) != fmt.Sprint(want) {
+		t.Errorf("tags = %v, want %v: a deleted photo's tags do not count", counts, want)
 	}
 }
 

@@ -19,6 +19,7 @@ func RegisterHandlers(mux *http.ServeMux, s *Store) {
 	h := &handler{s: s}
 	mux.HandleFunc("GET /health", h.health)
 	mux.HandleFunc("GET /date-sources", h.dateSources)
+	mux.HandleFunc("GET /tags", h.tagCounts)
 	mux.HandleFunc("GET /photos", h.list)
 	mux.HandleFunc("POST /imports", h.importPhotos)
 	mux.HandleFunc("GET /photos/{id}", h.get)
@@ -43,6 +44,14 @@ func (h *handler) health(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, Health{Status: "ok", Counts: counts})
+}
+
+func (h *handler) tagCounts(w http.ResponseWriter, r *http.Request) {
+	counts, err := h.s.TagCounts()
+	if respondError(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, counts)
 }
 
 func (h *handler) dateSources(w http.ResponseWriter, r *http.Request) {
