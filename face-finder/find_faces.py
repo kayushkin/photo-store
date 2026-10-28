@@ -17,6 +17,7 @@ import argparse
 import base64
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -28,14 +29,22 @@ MODEL = "insightface-buffalo_l"
 
 
 def call(store_url, method, path, body=None):
+    """One request to photo-store. A refused connection is retried for up to
+    two minutes, since a deploy restarts the store; anything else is final."""
     data = None if body is None else json.dumps(body).encode()
-    request = urllib.request.Request(store_url + path, data=data, method=method,
-                                     headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            return response.status, response.read()
-    except urllib.error.HTTPError as error:
-        return error.code, error.read()
+    for attempt in range(25):
+        request = urllib.request.Request(store_url + path, data=data, method=method,
+                                         headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, error.read()
+        except urllib.error.URLError as error:
+            if attempt == 24:
+                raise
+            print(f"photo-store unreachable ({error.reason}); retrying in 5 s", file=sys.stderr, flush=True)
+            time.sleep(5)
 
 
 def main():
