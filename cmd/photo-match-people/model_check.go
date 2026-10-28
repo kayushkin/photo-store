@@ -179,12 +179,11 @@ func markdownToPlain(markdown string) string {
 
 // checkSuggestions asks the model about up to limit suggested links with a
 // face, and confirms the ones it says are the person and rejects the ones it
-// says are not. A link to a person with no confirmed face is compared with
-// the other faces suggested as them. It answers how many it confirmed,
-// rejected and left.
+// says are not. A link to a person with no confirmed face is left for a
+// person to confirm their first face. It answers how many it asked, how they
+// came out, and how many wait.
 func (c *modelChecker) checkSuggestions(links []photostore.PhotoPerson, limit int, dryRun bool) (map[string]int, error) {
 	confirmedFaces := map[string][]string{}
-	suggestedFaces := map[string][]string{}
 	var suggestions []photostore.PhotoPerson
 	for _, link := range links {
 		if link.FaceID == "" {
@@ -194,7 +193,6 @@ func (c *modelChecker) checkSuggestions(links []photostore.PhotoPerson, limit in
 		case photostore.PhotoPersonConfirmed:
 			confirmedFaces[link.PersonID] = append(confirmedFaces[link.PersonID], link.FaceID)
 		case photostore.PhotoPersonSuggested:
-			suggestedFaces[link.PersonID] = append(suggestedFaces[link.PersonID], link.FaceID)
 			suggestions = append(suggestions, link)
 		}
 	}
@@ -211,17 +209,15 @@ func (c *modelChecker) checkSuggestions(links []photostore.PhotoPerson, limit in
 		if strings.Contains(link.Evidence, modelVerdictMarker) {
 			continue
 		}
+		// Only faces a person confirmed, or confirmed from one they did, say
+		// who someone is. Faces merely suggested as a person agree with each
+		// other whoever they are: the face that recurs in a chat with someone
+		// is often their child. So a person with no confirmed face waits for
+		// one, confirmed by hand.
 		known := confirmedFaces[link.PersonID]
 		comparedWith := "faces confirmed as them"
 		if len(known) == 0 {
-			comparedWith = "other faces suggested as them"
-			for _, faceID := range suggestedFaces[link.PersonID] {
-				if faceID != link.FaceID {
-					known = append(known, faceID)
-				}
-			}
-		}
-		if len(known) == 0 {
+			outcome["waiting"]++
 			continue
 		}
 		known = c.mostSimilar(link.FaceID, known, 3)
