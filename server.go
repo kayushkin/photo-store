@@ -21,6 +21,7 @@ func RegisterHandlers(mux *http.ServeMux, s *Store) {
 	mux.HandleFunc("GET /date-sources", h.dateSources)
 	mux.HandleFunc("GET /tags", h.tagCounts)
 	mux.HandleFunc("GET /photos", h.list)
+	mux.HandleFunc("GET /taken-activity", h.takenActivity)
 	mux.HandleFunc("POST /imports", h.importPhotos)
 	mux.HandleFunc("GET /photos/{id}", h.get)
 	mux.HandleFunc("PATCH /photos/{id}", h.patch)
@@ -75,7 +76,8 @@ func integerParameter(w http.ResponseWriter, r *http.Request, name string) (int6
 func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	filter := Filter{Folder: query.Get("folder"), Query: query.Get("q"), Tag: query.Get("tag"), Person: query.Get("person"), Described: query.Get("described"),
-		HasGPS: query.Get("has_gps") == "true", Sha256: query.Get("sha256"), IncludeDeleted: query.Get("include_deleted") == "true"}
+		HasGPS: query.Get("has_gps") == "true", Sha256: query.Get("sha256"), IncludeDeleted: query.Get("include_deleted") == "true",
+		ExcludeTags: query["exclude_tag"]}
 	var ok bool
 	if filter.From, ok = integerParameter(w, r, "from"); !ok {
 		return

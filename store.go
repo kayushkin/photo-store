@@ -378,6 +378,7 @@ type Filter struct {
 	HasGPS         bool
 	Sha256         string // the original file's hash: at most one photo
 	IncludeDeleted bool
+	ExcludeTags    []string // tags none of the photos may carry
 	Limit          int
 	Offset         int
 }
@@ -388,7 +389,9 @@ const (
 )
 
 // List answers GET /photos.
-func (s *Store) List(filter Filter) ([]Photo, error) {
+// whereClause turns a filter into the SQL that selects its photos: "" or
+// " WHERE …", and its arguments. Paging is not part of it.
+func (filter Filter) whereClause() (string, []any, error) {
 	where := []string{}
 	args := []any{}
 	if !filter.IncludeDeleted {
@@ -426,7 +429,7 @@ func (s *Store) List(filter Filter) ([]Photo, error) {
 		where = append(where, "description = ''")
 	case "":
 	default:
-		return nil, fmt.Errorf("%w: described must be true or false", ErrInvalid)
+		return "", nil, fmt.Errorf("%w: described must be true or false", ErrInvalid)
 	}
 	if filter.HasGPS {
 		where = append(where, "latitude IS NOT NULL")
@@ -435,10 +438,22 @@ func (s *Store) List(filter Filter) ([]Photo, error) {
 		where = append(where, "sha256 = ?")
 		args = append(args, strings.ToLower(filter.Sha256))
 	}
-	query := `SELECT ` + photoColumns + ` FROM photos`
-	if len(where) > 0 {
-		query += " WHERE " + strings.Join(where, " AND ")
+	for _, tag := range filter.ExcludeTags {
+		where = append(where, "NOT EXISTS (SELECT 1 FROM json_each(photos.tags) WHERE value = ?)")
+		args = append(args, tag)
 	}
+	if len(where) == 0 {
+		return "", args, nil
+	}
+	return " WHERE " + strings.Join(where, " AND "), args, nil
+}
+
+func (s *Store) List(filter Filter) ([]Photo, error) {
+	whereSQL, args, err := filter.whereClause()
+	if err != nil {
+		return nil, err
+	}
+	query := `SELECT ` + photoColumns + ` FROM photos` + whereSQL
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = defaultLimit

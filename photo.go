@@ -103,3 +103,15 @@ type Health struct {
 	Status string `json:"status"`
 	Counts Counts `json:"counts"`
 }
+
+// TakenActivityBucket is one span of time in GET /taken-activity: how many
+// photos were taken in it, and a few of them spread across it, so a page can
+// draw a strip of thumbnails over years without listing every photo.
+type TakenActivityBucket struct {
+	// Start is the span's first instant, epoch seconds, in the time zone asked.
+	Start int64 `json:"start"`
+	// Photos counts the live photos taken in the span that the filter keeps.
+	Photos int `json:"photos"`
+	// SamplePhotoIDs are up to `samples` of them, evenly spaced in time order.
+	SamplePhotoIDs []string `json:"sample_photo_ids"`
+}

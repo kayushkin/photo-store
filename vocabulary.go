@@ -31,3 +31,7 @@ func knownDateSource(source string) bool {
 	}
 	return false
 }
+
+// TakenActivityIntervals are the span sizes GET /taken-activity counts in.
+// A week starts on Monday.
+var TakenActivityIntervals = []string{"day", "week", "month", "year"}
