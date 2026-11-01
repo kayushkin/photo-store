@@ -34,6 +34,7 @@ import (
 
 	"github.com/kayushkin/llm-bridge/servicesettings"
 	photostore "github.com/kayushkin/photo-store"
+	"github.com/kayushkin/photo-store/internal/messagecitation"
 	"github.com/kayushkin/photo-store/internal/peoplematching"
 )
 
@@ -99,16 +100,19 @@ func (c client) postJSON(target string, payload any) (int, []byte, error) {
 
 type settings struct {
 	storeURL, multichatURL, multichatToken, journalURL, peopleURL string
+	messages                                                      messagecitation.Store
 }
 
 // contextReader finds the people a photo's source names, caching each look-up.
 type contextReader struct {
 	client
 	settings
-	rooms      map[string]room
-	persons    map[string]string // matrix user id → person id, "" for nobody
-	entries    map[string][]string
-	operatorID string
+	rooms   map[string]room
+	persons map[string]string // matrix user id → person id, "" for nobody
+	entries map[string][]string
+	// conversations caches message-store's conversations by id.
+	conversations map[string]messagecitation.Conversation
+	operatorID    string
 }
 
 type room struct {
@@ -193,6 +197,35 @@ func (r *contextReader) peopleOf(photo photostore.Photo) (map[string]string, err
 				named[personID] = reason
 			}
 		}
+	case strings.HasPrefix(photo.SourcePath, "chat_message_"):
+		message, err := r.settings.messages.MessageByID(photo.SourcePath)
+		if err != nil {
+			return nil, err
+		}
+		conversation, cached := r.conversations[message.ConversationID]
+		if !cached {
+			if conversation, err = r.settings.messages.ConversationByID(message.ConversationID); err != nil {
+				return nil, err
+			}
+			r.conversations[message.ConversationID] = conversation
+		}
+		reason := fmt.Sprintf("sent in [%s](ref:%s)", conversation.Title, photo.SourcePath)
+		if len(conversation.Participants) > largestChatForContext {
+			if message.SenderPersonID != "" {
+				named[message.SenderPersonID] = fmt.Sprintf("posted in [%s](ref:%s)", conversation.Title, photo.SourcePath)
+			}
+			break
+		}
+		// Everyone in a small chat, the operator included under whichever
+		// handle that app gives them.
+		for _, participant := range conversation.Participants {
+			if participant.PersonID != "" {
+				named[participant.PersonID] = reason
+			}
+		}
+		if r.operatorID != "" {
+			named[r.operatorID] = reason
+		}
 	case strings.HasPrefix(photo.SourcePath, "entry_"):
 		people, cached := r.entries[photo.SourcePath]
 		if !cached {
@@ -238,7 +271,8 @@ func main() {
 	}
 	config := settings{storeURL: strings.TrimRight(*storeURL, "/"),
 		multichatURL: strings.TrimRight(registry.String(photostore.SettingMultichatURL), "/"), multichatToken: registry.String(photostore.SettingMultichatToken),
-		journalURL: strings.TrimRight(registry.String(photostore.SettingJournalStoreURL), "/"), peopleURL: strings.TrimRight(registry.String(photostore.SettingPeopleStoreURL), "/")}
+		journalURL: strings.TrimRight(registry.String(photostore.SettingJournalStoreURL), "/"), peopleURL: strings.TrimRight(registry.String(photostore.SettingPeopleStoreURL), "/"),
+		messages: messagecitation.Store{Base: registry.String(photostore.SettingMessageStoreURL), Client: &http.Client{Timeout: time.Minute}}}
 	web := client{http: &http.Client{Timeout: 2 * time.Minute}}
 	if err := run(web, config, *operator, *model, *seedPerson, *seedPhotos, *seedDecidedBy, *dryRun); err != nil {
 		fail(err)
@@ -332,7 +366,8 @@ func run(web client, config settings, operator, model, seedPerson, seedPhotos, s
 	if err != nil {
 		return err
 	}
-	reader := &contextReader{client: web, settings: config, persons: map[string]string{}, entries: map[string][]string{}, operatorID: operator}
+	reader := &contextReader{client: web, settings: config, persons: map[string]string{}, entries: map[string][]string{},
+		conversations: map[string]messagecitation.Conversation{}, operatorID: operator}
 	if err := reader.loadRooms(); err != nil {
 		return err
 	}

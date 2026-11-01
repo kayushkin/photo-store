@@ -7,6 +7,7 @@ import (
 	photostore "github.com/kayushkin/photo-store"
 	"github.com/kayushkin/photo-store/internal/importbatch"
 	"github.com/kayushkin/photo-store/internal/journalcitation"
+	"github.com/kayushkin/photo-store/internal/messagecitation"
 	"os"
 	"path"
 	"path/filepath"
@@ -19,12 +20,13 @@ import (
 // DMs to, in place of a server id.
 const directMessagesFolder = "direct-messages"
 
-// The journal-store tags its importers give Discord and Messenger
-// transcripts.
-const (
-	discordTranscriptTag   = "discord-package"
-	messengerTranscriptTag = "facebook-messenger"
-)
+// messengerTranscriptTag is the journal-store tag its importer gives
+// Messenger transcripts.
+const messengerTranscriptTag = "facebook-messenger"
+
+// discordMessageSource is the source message-store's Discord importer files
+// a message under, with its Discord message id as the ref.
+const discordMessageSource = "discord"
 
 // discordEpochMilliseconds is when Discord's snowflake ids start counting.
 const discordEpochMilliseconds = 1420070400000
@@ -44,14 +46,16 @@ func chatName(title string) string {
 }
 
 // importDirectMessages adds the images multichat-fetch-discord-history saved
-// from DMs, each cited by the Discord transcript that holds its message.
-func importDirectMessages(journal journalcitation.Store, in *importbatch.Batch, folder string) error {
+// from DMs, each citing the message-store message it was sent in (filed under
+// its Discord message id) and filed under that conversation's title.
+func importDirectMessages(messages messagecitation.Store, in *importbatch.Batch, folder string) error {
 	manifest := filepath.Join(folder, "images.jsonl")
 	file, err := os.Open(manifest)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	titles := map[string]string{}
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		var line struct {
@@ -66,20 +70,29 @@ func importDirectMessages(journal journalcitation.Store, in *importbatch.Batch, 
 		if err != nil {
 			return fmt.Errorf("%s: message id %q: %w", manifest, line.MessageID, err)
 		}
-		found, err := journal.EntryCiting(discordTranscriptTag, line.MessageID)
-		if _, notOne := err.(journalcitation.ErrNotOne); notOne {
-			in.Report["no one Discord transcript holds its message ("+err.Error()+")"]++
+		found, err := messages.MessageFiledAs(discordMessageSource, line.MessageID)
+		if _, notOne := err.(messagecitation.ErrNotOne); notOne {
+			in.Report["message-store holds not one message for it ("+err.Error()+")"]++
 			continue
 		}
 		if err != nil {
 			return err
+		}
+		title, known := titles[found.ConversationID]
+		if !known {
+			conversation, err := messages.ConversationByID(found.ConversationID)
+			if err != nil {
+				return err
+			}
+			title = conversation.Title
+			titles[found.ConversationID] = title
 		}
 		original, err := os.ReadFile(filepath.Join(folder, line.Path))
 		if err != nil {
 			return err
 		}
 		sentAt := time.UnixMilli(snowflake>>22 + discordEpochMilliseconds)
-		in.Add(original, line.ContentType, multichatMachine, found.ID, "discord/direct-messages/"+chatName(found.Title), sentAt, photostore.DateFromMessage)
+		in.Add(original, line.ContentType, multichatMachine, found.ID, "discord/direct-messages/"+title, sentAt, photostore.DateFromMessage)
 	}
 	return scanner.Err()
 }

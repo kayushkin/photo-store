@@ -36,6 +36,7 @@ import (
 	photostore "github.com/kayushkin/photo-store"
 	"github.com/kayushkin/photo-store/internal/importbatch"
 	"github.com/kayushkin/photo-store/internal/journalcitation"
+	"github.com/kayushkin/photo-store/internal/messagecitation"
 )
 
 type conversation struct {
@@ -135,7 +136,7 @@ const multichatMachine = "multichat"
 func main() {
 	maxMembers := flag.Int("max-members", 8, "take photos only from chats with at most this many members")
 	archive := flag.String("discord-archive", "", "a multichat-fetch-discord-history output directory whose saved images to import as well")
-	directMessages := flag.String("discord-direct-messages", "", "a multichat-fetch-discord-history direct-messages folder whose saved images to import, cited by journal-store's Discord transcripts")
+	directMessages := flag.String("discord-direct-messages", "", "a multichat-fetch-discord-history direct-messages folder whose saved images to import, each citing the message-store message it was sent in")
 	facebookMessages := flag.String("facebook-messages", "", "a Facebook export's your_facebook_activity/messages folder whose photos to import, cited by journal-store's Messenger transcripts")
 	chats := flag.Bool("chats", true, "import the photos in multichat's chats")
 	var rooms roomList
@@ -154,8 +155,9 @@ func main() {
 	chat := multichat{base: settings.String(photostore.SettingMultichatURL), token: settings.String(photostore.SettingMultichatToken),
 		client: &http.Client{Timeout: 2 * time.Minute}}
 	journal := journalcitation.Store{Base: settings.String(photostore.SettingJournalStoreURL), Client: &http.Client{Timeout: time.Minute}}
+	messages := messagecitation.Store{Base: settings.String(photostore.SettingMessageStoreURL), Client: &http.Client{Timeout: time.Minute}}
 	sources := sources{chats: *chats, rooms: rooms, archive: *archive, directMessages: *directMessages, facebookMessages: *facebookMessages}
-	if err := run(chat, journal, *maxMembers, sources, *storeURL, *dryRun, os.Stdout); err != nil {
+	if err := run(chat, journal, messages, *maxMembers, sources, *storeURL, *dryRun, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "photo-import-messages: %v\n", err)
 		os.Exit(1)
 	}
@@ -170,7 +172,7 @@ type sources struct {
 	facebookMessages string
 }
 
-func run(chat multichat, journal journalcitation.Store, maxMembers int, from sources, storeURL string, dryRun bool, out io.Writer) error {
+func run(chat multichat, journal journalcitation.Store, messages messagecitation.Store, maxMembers int, from sources, storeURL string, dryRun bool, out io.Writer) error {
 	in := importbatch.New()
 	if from.chats {
 		if err := importChats(chat, in, maxMembers, out); err != nil {
@@ -188,7 +190,7 @@ func run(chat multichat, journal journalcitation.Store, maxMembers int, from sou
 		}
 	}
 	if from.directMessages != "" {
-		if err := importDirectMessages(journal, in, from.directMessages); err != nil {
+		if err := importDirectMessages(messages, in, from.directMessages); err != nil {
 			return err
 		}
 	}

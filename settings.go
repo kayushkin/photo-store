@@ -66,6 +66,7 @@ const (
 	SettingMultichatURL    = "multichat_url"
 	SettingMultichatToken  = "multichat_token"
 	SettingJournalStoreURL = "journal_store_url"
+	SettingMessageStoreURL = "message_store_url"
 )
 
 // ImportMessagesSettingDefinitions declares every environment variable
@@ -77,7 +78,9 @@ func ImportMessagesSettingDefinitions() []servicesettings.Definition {
 		{Key: SettingMultichatToken, EnvironmentVariable: "MULTICHAT_TOKEN", Kind: msg.ServiceSettingKindSecret, ValueType: msg.ServiceSettingValueTypeString, Required: true,
 			Description: "multichat's bearer token."},
 		{Key: SettingJournalStoreURL, EnvironmentVariable: "JOURNAL_STORE_URL", Kind: msg.ServiceSettingKindWiring, ValueType: msg.ServiceSettingValueTypeString, Default: "http://127.0.0.1:8322",
-			Description: "Where journal-store answers: the transcripts a photo from a Discord DM or Messenger export is cited by."},
+			Description: "Where journal-store answers: the transcripts a photo from a Messenger export is cited by."},
+		{Key: SettingMessageStoreURL, EnvironmentVariable: "MESSAGE_STORE_URL", Kind: msg.ServiceSettingKindWiring, ValueType: msg.ServiceSettingValueTypeString, Default: "http://127.0.0.1:8337",
+			Description: "Where message-store answers: the chat message a photo from a fetched Discord DM was sent in, which the photo cites."},
 	}
 }
 
@@ -113,6 +116,8 @@ func MatchPeopleSettingDefinitions() []servicesettings.Definition {
 			Description: "multichat's bearer token."},
 		{Key: SettingJournalStoreURL, EnvironmentVariable: "JOURNAL_STORE_URL", Kind: msg.ServiceSettingKindWiring, ValueType: msg.ServiceSettingValueTypeString, Default: "http://127.0.0.1:8322",
 			Description: "Where journal-store answers: the transcripts that cite a photo, and the people they link."},
+		{Key: SettingMessageStoreURL, EnvironmentVariable: "MESSAGE_STORE_URL", Kind: msg.ServiceSettingKindWiring, ValueType: msg.ServiceSettingValueTypeString, Default: "http://127.0.0.1:8337",
+			Description: "Where message-store answers: the chat message a photo cites, and the people in its conversation."},
 		{Key: SettingPeopleStoreURL, EnvironmentVariable: "PEOPLE_STORE_URL", Kind: msg.ServiceSettingKindWiring, ValueType: msg.ServiceSettingValueTypeString, Default: "http://127.0.0.1:8321",
 			Description: "Where people-store answers: which person a chat handle belongs to."},
 		{Key: SettingBridgeURL, EnvironmentVariable: "LLM_BRIDGE_URL", Kind: msg.ServiceSettingKindWiring, ValueType: msg.ServiceSettingValueTypeString, Default: "http://127.0.0.1:8160",
