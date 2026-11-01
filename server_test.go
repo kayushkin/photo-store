@@ -282,3 +282,63 @@ func TestPurgeRemovesTheThumbnailAndDescriptionForGood(t *testing.T) {
 		t.Errorf("purging again = %d, want 200", status)
 	}
 }
+
+func TestAPhotoKeepsEveryPlaceItWasFound(t *testing.T) {
+	service := newTestService(t)
+	first := photoOf("a", 1300000000)
+	first.SourceMachine, first.SourcePath, first.Folder = "multichat", "message_000001", "chat/one"
+	service.call(http.MethodPost, "/imports", ImportRequest{Photos: []ImportPhoto{first}}, nil)
+	again := first
+	again.SourcePath, again.Folder = "message_000009", "chat/two"
+	service.call(http.MethodPost, "/imports", ImportRequest{Photos: []ImportPhoto{again}}, nil)
+	service.call(http.MethodPost, "/imports", ImportRequest{Photos: []ImportPhoto{again}}, nil)
+
+	var sightings []Sighting
+	if status, body := service.call(http.MethodGet, "/sightings?source_machine=multichat", nil, &sightings); status != http.StatusOK {
+		t.Fatalf("sightings = %d: %s", status, body)
+	}
+	if len(sightings) != 2 || sightings[0].SourcePath != "message_000001" || sightings[1].SourcePath != "message_000009" ||
+		sightings[0].PhotoID != "photo_000001" || sightings[0].MediaType != "image/jpeg" {
+		t.Fatalf("sightings = %+v, want the first message and the second, once each", sightings)
+	}
+	var none []Sighting
+	service.call(http.MethodGet, "/sightings?source_machine=laptop", nil, &none)
+	if len(none) != 0 {
+		t.Fatalf("another machine's sightings = %+v", none)
+	}
+}
+
+func TestOpeningAnOlderStoreFillsSightingsFromItsRevisions(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := photoOf("a", 1300000000)
+	first.SourceMachine, first.SourcePath = "multichat", "message_000001"
+	if _, err := store.Import(ImportRequest{Photos: []ImportPhoto{first}}); err != nil {
+		t.Fatal(err)
+	}
+	moved := first
+	moved.SourcePath = "message_000009"
+	if _, err := store.Import(ImportRequest{Photos: []ImportPhoto{moved}}); err != nil {
+		t.Fatal(err)
+	}
+	// An older store had no sightings: empty the table, then open again.
+	if _, err := store.db.Exec(`DELETE FROM photo_sightings`); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	store, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	sightings, err := store.Sightings("multichat", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sightings) != 2 {
+		t.Fatalf("sightings = %+v, want the current place and the one in the revisions", sightings)
+	}
+}

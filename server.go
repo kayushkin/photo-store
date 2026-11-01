@@ -21,6 +21,7 @@ func RegisterHandlers(mux *http.ServeMux, s *Store) {
 	mux.HandleFunc("GET /date-sources", h.dateSources)
 	mux.HandleFunc("GET /tags", h.tagCounts)
 	mux.HandleFunc("GET /photos", h.list)
+	mux.HandleFunc("GET /sightings", h.sightings)
 	mux.HandleFunc("GET /taken-activity", h.takenActivity)
 	mux.HandleFunc("POST /imports", h.importPhotos)
 	mux.HandleFunc("GET /photos/{id}", h.get)
@@ -222,6 +223,24 @@ func (h *handler) thumbnail(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "private, max-age=86400")
 	w.Write(content)
+}
+
+// sightings answers GET /sightings?source_machine=&limit=&offset=: every
+// place a live photo was found.
+func (h *handler) sightings(w http.ResponseWriter, r *http.Request) {
+	limit, ok := integerParameter(w, r, "limit")
+	if !ok {
+		return
+	}
+	offset, ok := integerParameter(w, r, "offset")
+	if !ok {
+		return
+	}
+	sightings, err := h.s.Sightings(r.URL.Query().Get("source_machine"), int(limit), int(offset))
+	if respondError(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, sightings)
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

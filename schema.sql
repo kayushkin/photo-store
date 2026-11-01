@@ -43,6 +43,21 @@ CREATE TABLE IF NOT EXISTS photo_revisions (
 );
 CREATE INDEX IF NOT EXISTS idx_photo_revisions_photo ON photo_revisions(photo_id, revision_id DESC);
 
+-- Every place a photo was found: one picture can be sent in several chat
+-- messages, or sit in several folders, and the photo row names only the
+-- latest. An import adds the place it found the photo and never removes one,
+-- so a message that carried a picture keeps pointing at it after the same
+-- picture turns up somewhere else.
+CREATE TABLE IF NOT EXISTS photo_sightings (
+    photo_id        TEXT NOT NULL REFERENCES photos(id),
+    source_machine  TEXT NOT NULL,
+    source_path     TEXT NOT NULL,
+    folder          TEXT NOT NULL,
+    seen_at         INTEGER NOT NULL,              -- when an import first found it there
+    PRIMARY KEY (photo_id, source_machine, source_path)
+);
+CREATE INDEX IF NOT EXISTS idx_photo_sightings_place ON photo_sightings(source_machine, source_path);
+
 -- Faces a face-recognition model found on a photo's thumbnail. A photo is
 -- scanned once per model; face_scans records the scan even when it found no
 -- face, so a scanner knows what is left. The box is in fractions of the

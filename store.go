@@ -67,6 +67,10 @@ func Open(dataDir string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if err := fillSightings(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	if err := os.Chmod(dbPath, 0o600); err != nil {
 		db.Close()
 		return nil, err
@@ -279,6 +283,9 @@ func (s *Store) Import(request ImportRequest) (*ImportResult, error) {
 					photo.Width, photo.Height, at, at); err != nil {
 					return err
 				}
+				if err := addSighting(tx, id, photo, at); err != nil {
+					return err
+				}
 				result.Created++
 				result.IDs = append(result.IDs, id)
 				continue
@@ -291,6 +298,9 @@ func (s *Store) Import(request ImportRequest) (*ImportResult, error) {
 				return err
 			}
 			result.IDs = append(result.IDs, existing)
+			if err := addSighting(tx, existing, photo, at); err != nil {
+				return err
+			}
 			if current.PurgedAt != 0 {
 				purged[photo.Sha256] = true
 				result.Skipped++
@@ -328,6 +338,74 @@ func (s *Store) Import(request ImportRequest) (*ImportResult, error) {
 		}
 	}
 	return result, nil
+}
+
+// fillSightings gives an empty photo_sightings every place the store has
+// recorded a photo: each photo's current place, and every earlier one its
+// revisions kept.
+func fillSightings(db *sql.DB) error {
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM photo_sightings`).Scan(&count); err != nil || count > 0 {
+		return err
+	}
+	_, err := db.Exec(`
+		INSERT OR IGNORE INTO photo_sightings (photo_id, source_machine, source_path, folder, seen_at)
+		SELECT photo_id, json_extract(row_json, '$.source_machine'), json_extract(row_json, '$.source_path'),
+			COALESCE(json_extract(row_json, '$.folder'), ''), MIN(replaced_at)
+		FROM photo_revisions
+		WHERE json_extract(row_json, '$.source_path') IS NOT NULL AND json_extract(row_json, '$.source_path') != ''
+		GROUP BY photo_id, json_extract(row_json, '$.source_machine'), json_extract(row_json, '$.source_path');
+		INSERT OR IGNORE INTO photo_sightings (photo_id, source_machine, source_path, folder, seen_at)
+		SELECT id, source_machine, source_path, folder, updated_at FROM photos WHERE source_path != '';`)
+	return err
+}
+
+// addSighting records that an import found a photo at a place.
+func addSighting(tx *sql.Tx, photoID string, photo ImportPhoto, at int64) error {
+	_, err := tx.Exec(`INSERT OR IGNORE INTO photo_sightings (photo_id, source_machine, source_path, folder, seen_at) VALUES (?,?,?,?,?)`,
+		photoID, photo.SourceMachine, photo.SourcePath, photo.Folder, at)
+	return err
+}
+
+// Sighting is one place a photo was found, with what a reader of places
+// needs to know about the photo.
+type Sighting struct {
+	PhotoID       string   `json:"photo_id"`
+	SourceMachine string   `json:"source_machine"`
+	SourcePath    string   `json:"source_path"`
+	Folder        string   `json:"folder"`
+	SeenAt        int64    `json:"seen_at"`
+	MediaType     string   `json:"media_type"`
+	Tags          []string `json:"tags"`
+}
+
+// Sightings lists the places live photos were found on one machine (every
+// machine when it is ""), ordered by photo and place, for paging.
+func (s *Store) Sightings(sourceMachine string, limit, offset int) ([]Sighting, error) {
+	if limit <= 0 || limit > 5000 {
+		limit = 1000
+	}
+	rows, err := s.db.Query(`SELECT s.photo_id, s.source_machine, s.source_path, s.folder, s.seen_at, p.media_type, p.tags
+		FROM photo_sightings s JOIN photos p ON p.id = s.photo_id
+		WHERE p.deleted_at = 0 AND (? = '' OR s.source_machine = ?)
+		ORDER BY s.photo_id, s.source_machine, s.source_path LIMIT ? OFFSET ?`, sourceMachine, sourceMachine, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	sightings := []Sighting{}
+	for rows.Next() {
+		var sighting Sighting
+		var tags string
+		if err := rows.Scan(&sighting.PhotoID, &sighting.SourceMachine, &sighting.SourcePath, &sighting.Folder, &sighting.SeenAt, &sighting.MediaType, &tags); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(tags), &sighting.Tags); err != nil {
+			return nil, fmt.Errorf("photo %s tags: %w", sighting.PhotoID, err)
+		}
+		sightings = append(sightings, sighting)
+	}
+	return sightings, rows.Err()
 }
 
 func sameFloat(a, b *float64) bool {
