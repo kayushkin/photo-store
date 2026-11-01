@@ -47,16 +47,15 @@ type conversation struct {
 }
 
 type loggedMessage struct {
-	Ref              string     `json:"ref"`
-	RoomName         string     `json:"room_name"`
-	Platform         string     `json:"platform"`
-	NetworkName      string     `json:"network_name"`
-	ChannelName      string     `json:"channel_name"`
-	DiscordMessageID string     `json:"discord_message_id"`
-	MediaURL         string     `json:"media_url"`
-	MediaMimetype    string     `json:"media_mimetype"`
-	SentAt           time.Time  `json:"sent_at"`
-	RedactedAt       *time.Time `json:"redacted_at"`
+	Ref              string    `json:"ref"`
+	RoomName         string    `json:"room_name"`
+	Platform         string    `json:"platform"`
+	NetworkName      string    `json:"network_name"`
+	ChannelName      string    `json:"channel_name"`
+	DiscordMessageID string    `json:"discord_message_id"`
+	MediaURL         string    `json:"media_url"`
+	MediaMimetype    string    `json:"media_mimetype"`
+	SentAt           time.Time `json:"sent_at"`
 }
 
 type multichat struct {
@@ -243,13 +242,15 @@ func importRoom(chat multichat, in *importbatch.Batch, roomID string, out io.Wri
 
 // addRoomImages adds every image still on the homeserver that was sent in a
 // room, each cited by its message log ref, under the folder folderFor names.
+// A message deleted on its app is kept like any other: the log keeps it and
+// the homeserver keeps its file, so this is the copy that outlives the delete.
 func addRoomImages(chat multichat, in *importbatch.Batch, roomID string, folderFor func(loggedMessage) string) error {
 	messages, err := chat.messages(url.Values{"room_id": {roomID}})
 	if err != nil {
 		return fmt.Errorf("room %s: %w", roomID, err)
 	}
 	for _, message := range messages {
-		if !strings.HasPrefix(message.MediaMimetype, "image/") || message.MediaURL == "" || message.RedactedAt != nil {
+		if !strings.HasPrefix(message.MediaMimetype, "image/") || message.MediaURL == "" {
 			continue
 		}
 		original, err := chat.media(message.MediaURL)
