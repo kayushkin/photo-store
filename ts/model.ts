@@ -29,7 +29,7 @@ export interface ScannedFace {
   detection_score: number /* float64 */;
   /**
    * EmbeddingFloat32Base64 is the model's description of the face:
-   * little-endian float32s, base64. The store normalises it to length 1.
+   * little-endian float32s, base64. The store normalizes it to length 1.
    */
   embedding_float32_base64: string;
 }

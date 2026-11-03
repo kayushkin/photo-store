@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// unit is a normalised two-number embedding at an angle, so similarities are
+// unit is a normalized two-number embedding at an angle, so similarities are
 // easy to reason about: cos(angle difference).
 func unit(id, photoID string, degrees float64) Face {
 	radians := degrees * math.Pi / 180

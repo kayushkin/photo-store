@@ -63,7 +63,7 @@ CREATE INDEX IF NOT EXISTS idx_photo_sightings_place ON photo_sightings(source_m
 -- face, so a scanner knows what is left. The box is in fractions of the
 -- thumbnail's width and height, and may run past its edges a little where a
 -- face is cut off. The embedding is the model's description of the face:
--- little-endian float32s, normalised to length 1, so two faces' cosine
+-- little-endian float32s, normalized to length 1, so two faces' cosine
 -- similarity is their dot product.
 CREATE TABLE IF NOT EXISTS face_scans (
     photo_id        TEXT NOT NULL REFERENCES photos(id),

@@ -17,7 +17,7 @@ type ScannedFace struct {
 	Box            FaceBox `json:"box"`
 	DetectionScore float64 `json:"detection_score"`
 	// EmbeddingFloat32Base64 is the model's description of the face:
-	// little-endian float32s, base64. The store normalises it to length 1.
+	// little-endian float32s, base64. The store normalizes it to length 1.
 	EmbeddingFloat32Base64 string `json:"embedding_float32_base64"`
 }
 

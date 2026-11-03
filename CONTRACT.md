@@ -40,7 +40,7 @@ file 0600).
 | `GET` | `/settings` | the declared settings |
 | `GET` | `/date-sources` | `["exif","filename","mtime","message","upload","google_photos","unknown"]` |
 | `GET` | `/tags` | every tag on a live photo with how many live photos carry it, most used first: `[{tag, photos}]` |
-| `POST` | `/face-scans` | `{photo_id, model, faces:[{box:{left,top,right,bottom}, detection_score, embedding_float32_base64}]}`: what one face model found on one photo's thumbnail, all or nothing; an empty `faces` records that it found none. Boxes are fractions of the thumbnail, up to 0.5 past an edge. The embedding is stored normalised to length 1. A photo already scanned by the model is a **409**, so a face id keeps meaning one face. **201** with the faces |
+| `POST` | `/face-scans` | `{photo_id, model, faces:[{box:{left,top,right,bottom}, detection_score, embedding_float32_base64}]}`: what one face model found on one photo's thumbnail, all or nothing; an empty `faces` records that it found none. Boxes are fractions of the thumbnail, up to 0.5 past an edge. The embedding is stored normalized to length 1. A photo already scanned by the model is a **409**, so a face id keeps meaning one face. **201** with the faces |
 | `GET` | `/face-scans/pending` | `?model=` (required) `&limit=`: ids of live, unpurged images that model has not scanned, oldest first |
 | `GET` | `/faces` | faces on live photos in id order: `?photo_id=`, `?model=`, `?after=<face id>` to page, `?include_embeddings=true`, `?limit=` (default and max 5000) |
 | `GET` | `/photos/{id}/faces` | the photo's faces, no embeddings |

@@ -23,7 +23,7 @@ func formatFaceID(seq int64) string { return fmt.Sprintf("face_%06d", seq) }
 
 func formatPhotoPersonID(seq int64) string { return fmt.Sprintf("photo_person_%06d", seq) }
 
-// decodeEmbedding reads a base64 float32 embedding and normalises it to
+// decodeEmbedding reads a base64 float32 embedding and normalizes it to
 // length 1, so a dot product of two is their cosine similarity.
 func decodeEmbedding(encoded string) ([]byte, error) {
 	raw, err := base64.StdEncoding.DecodeString(encoded)
@@ -46,11 +46,11 @@ func decodeEmbedding(encoded string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: an embedding of zeros describes no face", ErrInvalid)
 	}
 	length := math.Sqrt(squares)
-	normalised := make([]byte, len(raw))
+	normalized := make([]byte, len(raw))
 	for index, value := range values {
-		binary.LittleEndian.PutUint32(normalised[index*4:], math.Float32bits(float32(float64(value)/length)))
+		binary.LittleEndian.PutUint32(normalized[index*4:], math.Float32bits(float32(float64(value)/length)))
 	}
-	return normalised, nil
+	return normalized, nil
 }
 
 func validFaceBox(box FaceBox) bool {

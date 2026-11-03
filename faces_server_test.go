@@ -31,7 +31,7 @@ func realJPEG(t *testing.T) []byte {
 	return encoded.Bytes()
 }
 
-func TestAFaceScanIsKeptOnceAndItsEmbeddingNormalised(t *testing.T) {
+func TestAFaceScanIsKeptOnceAndItsEmbeddingNormalized(t *testing.T) {
 	service := newTestService(t)
 	withPicture := photoOf("n", 100)
 	withPicture.ThumbnailJPEG = realJPEG(t)
@@ -74,7 +74,7 @@ func TestAFaceScanIsKeptOnceAndItsEmbeddingNormalised(t *testing.T) {
 	raw, _ := base64.StdEncoding.DecodeString(withEmbeddings[0].EmbeddingFloat32Base64)
 	first := math.Float32frombits(binary.LittleEndian.Uint32(raw))
 	if math.Abs(float64(first)-0.6) > 1e-6 {
-		t.Errorf("the stored embedding starts %v, want 0.6: (3, 4) normalised", first)
+		t.Errorf("the stored embedding starts %v, want 0.6: (3, 4) normalized", first)
 	}
 	if status, image := service.call(http.MethodGet, "/faces/face_000001/image", nil, nil); status != http.StatusOK || len(image) < 2 || image[0] != 0xFF || image[1] != 0xD8 {
 		t.Errorf("GET /faces/face_000001/image = %d, %d bytes; want a JPEG", status, len(image))

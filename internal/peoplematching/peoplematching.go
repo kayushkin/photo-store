@@ -13,7 +13,7 @@ import (
 	"sort"
 )
 
-// Thresholds on the cosine similarity of two normalised face embeddings
+// Thresholds on the cosine similarity of two normalized face embeddings
 // (InsightFace buffalo_l). Faces of one person usually score above 0.5 and
 // faces of two people below 0.3.
 const (
@@ -32,7 +32,7 @@ const (
 	ClusterMinimumPhotos = 3
 )
 
-// Face is a face with its normalised embedding.
+// Face is a face with its normalized embedding.
 type Face struct {
 	ID        string
 	PhotoID   string
@@ -52,7 +52,7 @@ func DecodeEmbedding(encoded string) ([]float32, error) {
 	return values, nil
 }
 
-// Similarity is the cosine similarity of two normalised embeddings.
+// Similarity is the cosine similarity of two normalized embeddings.
 func Similarity(a, b []float32) float64 {
 	var sum float64
 	for index := range a {

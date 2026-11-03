@@ -248,7 +248,7 @@ func TestPurgeRemovesTheThumbnailAndDescriptionForGood(t *testing.T) {
 	service := newTestService(t)
 	photo := photoOf("k", 100)
 	service.call(http.MethodPost, "/imports", ImportRequest{Photos: []ImportPhoto{photo}}, nil)
-	description, by := "A driver's licence", "test"
+	description, by := "A driver's license", "test"
 	service.call(http.MethodPatch, "/photos/photo_000001", PhotoPatch{Description: &description, DescribedBy: &by}, nil)
 	var purged Photo
 	if status, body := service.call(http.MethodPost, "/photos/photo_000001/purge", nil, &purged); status != http.StatusOK {
