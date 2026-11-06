@@ -41,8 +41,8 @@ type FaceGroup struct {
 	// seconds; 0 when none has a date.
 	FirstTakenAt int64 `json:"first_taken_at"`
 	LastTakenAt  int64 `json:"last_taken_at"`
-	// SampleFaceIDs are up to 12 of its faces, the most typical first, one
-	// per photo.
+	// SampleFaceIDs are up to 12 of its faces, one per photo, spread evenly
+	// from the most typical to the least.
 	SampleFaceIDs []string `json:"sample_face_ids"`
 	// Guesses are who models and context think it is, newest first.
 	Guesses []FaceGroupGuess `json:"guesses"`

@@ -51,7 +51,7 @@ file 0600).
 | `PATCH` | `/photo-people/{id}` | any of `status`, `decided_by`, `face_id`, `evidence`; a status change needs `decided_by`. Every change keeps the old row in `photo_person_revisions` |
 | `GET` | `/people-counts` | `[{person_id, confirmed, suggested}]` over live photos, rejected links left out, most confirmed first |
 | `GET` | `/face-group-statuses` | `["open","named","not_known","mixed"]` |
-| `GET` | `/face-groups` | groups of faces a grouper found to be one person, the most photos first: `?status=`, `?person_id=`, `?limit=` (default 100), `?offset=`. Each has `face_count`, `photo_count`, `first_taken_at`, `last_taken_at`, up to 12 `sample_face_ids` (the most typical first, one per photo) and its `guesses`, newest first |
+| `GET` | `/face-groups` | groups of faces a grouper found to be one person, the most photos first: `?status=`, `?person_id=`, `?limit=` (default 100), `?offset=`. Each has `face_count`, `photo_count`, `first_taken_at`, `last_taken_at`, up to 12 `sample_face_ids` (one per photo, spread evenly from the most typical to the least, so an odd face shows) and its `guesses`, newest first |
 | `POST` | `/face-groups` | `{model, made_by, members:[{face_id, similarity}]}`: a new open group. A face that is retired, on a deleted photo or found by another model is a 400; a face already in a group is a **409**. **201** with the group |
 | `GET` | `/face-groups/{id}` | one group with every face in `members` (`face_id`, `photo_id`, `similarity` to its average face, `taken_at`, `folder`) |
 | `POST` | `/face-groups/{id}/members` | `{members:[{face_id, similarity}]}`: faces that belong to an **open** group; a decided group is a 409 |

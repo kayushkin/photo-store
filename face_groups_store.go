@@ -257,23 +257,39 @@ func (s *Store) FaceGroupByID(id string, withMembers bool) (FaceGroup, error) {
 		return FaceGroup{}, err
 	}
 	photos := map[string]bool{}
-	group.SampleFaceIDs = []string{}
+	onePerPhoto := []string{}
 	for _, member := range members {
 		if member.TakenAt != 0 && (group.FirstTakenAt == 0 || member.TakenAt < group.FirstTakenAt) {
 			group.FirstTakenAt = member.TakenAt
 		}
 		group.LastTakenAt = max(group.LastTakenAt, member.TakenAt)
-		if !photos[member.PhotoID] && len(group.SampleFaceIDs) < faceGroupSampleSize {
-			group.SampleFaceIDs = append(group.SampleFaceIDs, member.FaceID)
+		if !photos[member.PhotoID] {
+			onePerPhoto = append(onePerPhoto, member.FaceID)
 		}
 		photos[member.PhotoID] = true
 	}
+	// Samples run evenly from the most typical face to the least, so a face
+	// that is someone else, which sits at the far end, shows among them.
+	group.SampleFaceIDs = evenlyFrom(onePerPhoto, faceGroupSampleSize)
 	group.FaceCount, group.PhotoCount = len(members), len(photos)
 	if withMembers {
 		group.Members = members
 	}
 	group.Guesses, err = s.faceGroupGuesses(id)
 	return group, err
+}
+
+// evenlyFrom picks up to count items spread evenly over a list, its first and
+// last included.
+func evenlyFrom(items []string, count int) []string {
+	if len(items) <= count {
+		return append([]string{}, items...)
+	}
+	picked := make([]string, 0, count)
+	for index := 0; index < count; index++ {
+		picked = append(picked, items[index*(len(items)-1)/(count-1)])
+	}
+	return picked
 }
 
 // faceGroupMembers reads a group's live faces, the most typical first.
