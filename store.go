@@ -8,6 +8,7 @@
 package photostore
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -67,6 +68,10 @@ func Open(dataDir string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if err := addFaceRetirement(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	if err := fillSightings(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
@@ -89,6 +94,27 @@ func addPurgedAt(db *sql.DB) error {
 	}
 	_, err := db.Exec(`ALTER TABLE photos ADD COLUMN purged_at INTEGER NOT NULL DEFAULT 0`)
 	return err
+}
+
+// addFaceRetirement adds faces.retired_at and faces.retired_reason to a
+// database made before a face could be retired.
+func addFaceRetirement(db *sql.DB) error {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('faces') WHERE name = 'retired_at'`).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	for _, statement := range []string{
+		`ALTER TABLE faces ADD COLUMN retired_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE faces ADD COLUMN retired_reason TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Close releases the database handle.
@@ -261,6 +287,19 @@ func (s *Store) Import(request ImportRequest) (*ImportResult, error) {
 		}
 		seen[photo.Sha256] = true
 	}
+	// A thumbnail that differs from the one kept is a different picture to
+	// a face model: the faces found on the old one are retired below.
+	thumbnailChanged := map[string]bool{}
+	for _, photo := range request.Photos {
+		kept, err := os.ReadFile(s.ThumbnailPath(photo.Sha256))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read the kept thumbnail of %s: %w", photo.Sha256, err)
+		}
+		thumbnailChanged[photo.Sha256] = !bytes.Equal(kept, photo.ThumbnailJPEG)
+	}
 	result := &ImportResult{IDs: make([]string, 0, len(request.Photos))}
 	purged := map[string]bool{}
 	err := s.inTransaction(func(tx *sql.Tx) error {
@@ -305,6 +344,13 @@ func (s *Store) Import(request ImportRequest) (*ImportResult, error) {
 				purged[photo.Sha256] = true
 				result.Skipped++
 				continue
+			}
+			if thumbnailChanged[photo.Sha256] {
+				retired, err := retireFacesOfPhoto(tx, existing, "", "an import replaced the thumbnail it was found on", at)
+				if err != nil {
+					return err
+				}
+				result.FacesRetired += retired
 			}
 			if current.SourceMachine == photo.SourceMachine && current.SourcePath == photo.SourcePath &&
 				current.Folder == photo.Folder && current.MediaType == photo.MediaType && current.TakenAt == photo.TakenAt &&

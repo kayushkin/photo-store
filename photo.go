@@ -62,6 +62,10 @@ type ImportResult struct {
 	Created int `json:"created"`
 	Updated int `json:"updated"`
 	Skipped int `json:"skipped"`
+	// FacesRetired counts the faces retired because an import replaced their
+	// photo's thumbnail with a different picture: they were measured on the
+	// old one, so the photo waits to be scanned again.
+	FacesRetired int `json:"faces_retired"`
 	// IDs is each photo's id, in request order.
 	IDs []string `json:"ids"`
 }

@@ -97,10 +97,15 @@ func (s *Store) RecordFaceScan(scan FaceScan) ([]Face, error) {
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM face_scans WHERE photo_id = ? AND model = ?`, scan.PhotoID, scan.Model).Scan(&scanned); err != nil {
 		return nil, err
 	}
-	if scanned > 0 {
-		return nil, fmt.Errorf("%w: %s was already scanned by %s", ErrConflict, scan.PhotoID, scan.Model)
-	}
 	created := now()
+	if scanned > 0 && !scan.Replaces {
+		return nil, fmt.Errorf("%w: %s was already scanned by %s; send replaces to scan it again", ErrConflict, scan.PhotoID, scan.Model)
+	}
+	if scanned > 0 {
+		if _, err := retireFacesOfPhoto(tx, scan.PhotoID, scan.Model, "a new scan by the same model replaced it", created); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := tx.Exec(`INSERT INTO face_scans (photo_id, model, face_count, scanned_at) VALUES (?, ?, ?, ?)`,
 		scan.PhotoID, scan.Model, len(scan.Faces), created); err != nil {
 		return nil, err
@@ -122,6 +127,57 @@ func (s *Store) RecordFaceScan(scan FaceScan) ([]Face, error) {
 		faces = append(faces, recorded)
 	}
 	return faces, tx.Commit()
+}
+
+// retireFacesOfPhoto retires the live faces one model (every model when
+// model is "") found on a photo, and forgets that the photo was scanned, so
+// it is scanned again. A retired face keeps its row and id but leaves every
+// list. A link that named one keeps its status, since whether the person is
+// in the photo did not change, but no longer names a face; its old row goes
+// to photo_person_revisions. It answers how many faces it retired.
+func retireFacesOfPhoto(tx *sql.Tx, photoID, model, reason string, at int64) (int, error) {
+	modelClause, args := "", []any{photoID}
+	if model != "" {
+		modelClause, args = " AND model = ?", append(args, model)
+	}
+	rows, err := tx.Query(`SELECT `+photoPersonColumns+` FROM photo_people WHERE face_id IN
+		(SELECT id FROM faces WHERE photo_id = ? AND retired_at = 0`+modelClause+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	links := []PhotoPerson{}
+	for rows.Next() {
+		link, err := scanPhotoPerson(rows)
+		if err != nil {
+			rows.Close()
+			return 0, err
+		}
+		links = append(links, link)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, link := range links {
+		if err := keepPhotoPersonRevision(tx, link, at); err != nil {
+			return 0, err
+		}
+		note := fmt.Sprintf("The face this link named (%s) was retired: %s.", link.FaceID, reason)
+		evidence := strings.TrimSpace(link.Evidence + "\n\n" + note)
+		if _, err := tx.Exec(`UPDATE photo_people SET face_id = NULL, evidence = ?, updated_at = ? WHERE id = ?`, evidence, at, link.ID); err != nil {
+			return 0, err
+		}
+	}
+	retired, err := tx.Exec(`UPDATE faces SET retired_at = ?, retired_reason = ? WHERE photo_id = ? AND retired_at = 0`+modelClause,
+		append([]any{at, reason}, args...)...)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`DELETE FROM face_scans WHERE photo_id = ?`+modelClause, args...); err != nil {
+		return 0, err
+	}
+	count, err := retired.RowsAffected()
+	return int(count), err
 }
 
 // PhotosNotScanned answers GET /face-scans/pending: live, unpurged images the
@@ -165,7 +221,7 @@ const maximumFaceLimit = 5000
 
 // Faces answers GET /faces and GET /photos/{id}/faces.
 func (s *Store) Faces(filter FaceFilter) ([]Face, error) {
-	where := []string{"photos.deleted_at = 0"}
+	where := []string{"photos.deleted_at = 0", "faces.retired_at = 0"}
 	args := []any{}
 	if filter.PhotoID != "" {
 		where = append(where, "faces.photo_id = ?")
@@ -233,19 +289,23 @@ func nullableFaceID(faceID string) any {
 	return faceID
 }
 
-// checkFaceOnPhoto refuses a face that is not on the photo.
+// checkFaceOnPhoto refuses a face that is not on the photo, or was retired.
 func checkFaceOnPhoto(tx *sql.Tx, faceID, photoID string) error {
 	if faceID == "" {
 		return nil
 	}
 	var onPhoto string
-	if err := tx.QueryRow(`SELECT photo_id FROM faces WHERE id = ?`, faceID).Scan(&onPhoto); errors.Is(err, sql.ErrNoRows) {
+	var retiredAt int64
+	if err := tx.QueryRow(`SELECT photo_id, retired_at FROM faces WHERE id = ?`, faceID).Scan(&onPhoto, &retiredAt); errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: no face %s", ErrInvalid, faceID)
 	} else if err != nil {
 		return err
 	}
 	if onPhoto != photoID {
 		return fmt.Errorf("%w: %s is on %s, not %s", ErrInvalid, faceID, onPhoto, photoID)
+	}
+	if retiredAt != 0 {
+		return fmt.Errorf("%w: %s was retired; name a face of the photo's current scan", ErrInvalid, faceID)
 	}
 	return nil
 }
@@ -318,6 +378,18 @@ func (s *Store) ProposePhotoPerson(proposal PhotoPersonProposal) (PhotoPerson, b
 		return link, true, tx.Commit()
 	case err != nil:
 		return PhotoPerson{}, false, err
+	}
+	if existing.Status == PhotoPersonConfirmed && existing.FaceID == "" && proposal.FaceID != "" {
+		// A confirmed link that lost its face (a rescan retired it) takes the
+		// face a matcher finds for the same person; its status stays.
+		if err := keepPhotoPersonRevision(tx, existing, at); err != nil {
+			return PhotoPerson{}, false, err
+		}
+		existing.FaceID, existing.UpdatedAt = proposal.FaceID, at
+		if _, err := tx.Exec(`UPDATE photo_people SET face_id = ?, updated_at = ? WHERE id = ?`, existing.FaceID, at, existing.ID); err != nil {
+			return PhotoPerson{}, false, err
+		}
+		return existing, false, tx.Commit()
 	}
 	if existing.Status != PhotoPersonSuggested {
 		return existing, false, tx.Commit()

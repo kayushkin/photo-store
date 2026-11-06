@@ -321,16 +321,43 @@ func run(web client, config settings, operator, model, seedPerson, seedPhotos, s
 		return err
 	}
 	linked := map[string]photostore.PhotoPerson{} // photo|person
+	withdrawn := 0
 	for _, link := range links {
+		// This matcher's own confirmation rested on the face it named; when a
+		// rescan retired that face the confirmation has nothing under it, so
+		// it goes back to suggested. A person's confirmation stays.
+		if link.Status == photostore.PhotoPersonConfirmed && link.FaceID == "" && strings.HasPrefix(link.DecidedBy, matcherName) {
+			if !dryRun {
+				suggested, decidedBy := photostore.PhotoPersonSuggested, matcherName+": the face it confirmed was retired"
+				if err := patchLink(web, config.storeURL, link.ID, photostore.PhotoPersonDecision{Status: &suggested, DecidedBy: &decidedBy}); err != nil {
+					return err
+				}
+			}
+			link.Status, link.DecidedBy = photostore.PhotoPersonSuggested, ""
+			withdrawn++
+		}
 		linked[link.PhotoID+"|"+link.PersonID] = link
+	}
+	if withdrawn > 0 {
+		fmt.Printf("returned %d of its own confirmations to suggested: their faces were retired\n", withdrawn)
 	}
 	written := map[string]int{}
 	propose := func(proposal photostore.PhotoPersonProposal) error {
-		if existing, seen := linked[proposal.PhotoID+"|"+proposal.PersonID]; seen && (existing.Status != photostore.PhotoPersonSuggested || proposal.Status == photostore.PhotoPersonSuggested) {
+		existing, seen := linked[proposal.PhotoID+"|"+proposal.PersonID]
+		// A confirmed link that lost its face to a rescan takes the face found
+		// for the same person, and stays confirmed.
+		reattach := seen && existing.Status == photostore.PhotoPersonConfirmed && existing.FaceID == "" && proposal.FaceID != ""
+		if seen && !reattach && (existing.Status != photostore.PhotoPersonSuggested || proposal.Status == photostore.PhotoPersonSuggested) {
 			return nil
 		}
-		written[proposal.Status]++
-		linked[proposal.PhotoID+"|"+proposal.PersonID] = photostore.PhotoPerson{PhotoID: proposal.PhotoID, PersonID: proposal.PersonID, FaceID: proposal.FaceID, Status: proposal.Status}
+		if reattach {
+			written["reattached"]++
+			existing.FaceID = proposal.FaceID
+			linked[proposal.PhotoID+"|"+proposal.PersonID] = existing
+		} else {
+			written[proposal.Status]++
+			linked[proposal.PhotoID+"|"+proposal.PersonID] = photostore.PhotoPerson{PhotoID: proposal.PhotoID, PersonID: proposal.PersonID, FaceID: proposal.FaceID, Status: proposal.Status}
+		}
 		if dryRun {
 			return nil
 		}
@@ -480,8 +507,8 @@ func run(web client, config settings, operator, model, seedPerson, seedPhotos, s
 	if dryRun {
 		mode = "would write"
 	}
-	fmt.Printf("%d faces on %d photos; %d photos with context; %s %d confirmed and %d suggested links\n",
-		len(faces), len(facesByPhoto), len(contextOf), mode, written[photostore.PhotoPersonConfirmed], written[photostore.PhotoPersonSuggested])
+	fmt.Printf("%d faces on %d photos; %d photos with context; %s %d confirmed and %d suggested links, and gave %d confirmed links their face again\n",
+		len(faces), len(facesByPhoto), len(contextOf), mode, written[photostore.PhotoPersonConfirmed], written[photostore.PhotoPersonSuggested], written["reattached"])
 	return nil
 }
 

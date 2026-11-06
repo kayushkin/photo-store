@@ -262,16 +262,21 @@ func (c *modelChecker) checkSuggestions(links []photostore.PhotoPerson, limit in
 }
 
 func (c *modelChecker) patch(id string, change photostore.PhotoPersonDecision) error {
+	return patchLink(c.web, c.storeURL, id, change)
+}
+
+// patchLink sends one PATCH /photo-people/{id}.
+func patchLink(web client, storeURL, id string, change photostore.PhotoPersonDecision) error {
 	body, err := json.Marshal(change)
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequest(http.MethodPatch, c.storeURL+"/photo-people/"+url.PathEscape(id), bytes.NewReader(body))
+	request, err := http.NewRequest(http.MethodPatch, storeURL+"/photo-people/"+url.PathEscape(id), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := c.web.http.Do(request)
+	response, err := web.http.Do(request)
 	if err != nil {
 		return err
 	}

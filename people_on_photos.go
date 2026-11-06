@@ -23,11 +23,13 @@ type ScannedFace struct {
 
 // FaceScan is the body of POST /face-scans: what one model found on one
 // photo, an empty Faces when it found none. A photo is scanned once per
-// model; a second scan is a 409.
+// model; a second scan is a 409 unless Replaces is set, which retires the
+// faces of the scan before it and keeps the new ones under new ids.
 type FaceScan struct {
-	PhotoID string        `json:"photo_id"`
-	Model   string        `json:"model"`
-	Faces   []ScannedFace `json:"faces"`
+	PhotoID  string        `json:"photo_id"`
+	Model    string        `json:"model"`
+	Faces    []ScannedFace `json:"faces"`
+	Replaces bool          `json:"replaces"`
 }
 
 // Face is a face found on a photo. EmbeddingFloat32Base64 is filled only when

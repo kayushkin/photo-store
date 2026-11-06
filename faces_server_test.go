@@ -8,6 +8,7 @@ import (
 	jpegcodec "image/jpeg"
 	"math"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -144,5 +145,73 @@ func TestPeopleOnAPhotoMoveOnlyUpwardAndARejectionHolds(t *testing.T) {
 	service.call(http.MethodGet, "/people-counts", nil, &counts)
 	if len(counts) != 1 || counts[0] != (PersonPhotoCount{PersonID: "person_000002", Suggested: 1}) {
 		t.Errorf("people counts = %+v, want only person_000002 suggested once: a rejected link counts for nobody", counts)
+	}
+}
+
+func TestARescanRetiresTheOldFacesAndALinkKeepsItsStatusButNotItsFace(t *testing.T) {
+	service := newTestService(t)
+	service.call(http.MethodPost, "/imports", ImportRequest{Photos: []ImportPhoto{photoOf("r", 100)}}, nil)
+	firstScan := FaceScan{PhotoID: "photo_000001", Model: "test-model", Faces: []ScannedFace{
+		{Box: FaceBox{Left: 0.5, Top: 0.4, Right: 0.9, Bottom: 0.8}, DetectionScore: 0.8, EmbeddingFloat32Base64: embeddingOf(1, 0)}}}
+	service.call(http.MethodPost, "/face-scans", firstScan, nil)
+	confirmed := PhotoPersonProposal{PhotoID: "photo_000001", PersonID: "person_000001", FaceID: "face_000001", Status: "confirmed",
+		Evidence: "they said so", ProposedBy: "operator", DecidedBy: "operator"}
+	service.call(http.MethodPost, "/photo-people", confirmed, nil)
+
+	secondScan := firstScan
+	secondScan.Faces = []ScannedFace{
+		{Box: FaceBox{Left: 0.3, Top: 0.05, Right: 0.7, Bottom: 0.45}, DetectionScore: 0.95, EmbeddingFloat32Base64: embeddingOf(0, 1)},
+		{Box: FaceBox{Left: 0, Top: 0.3, Right: 0.3, Bottom: 0.7}, DetectionScore: 0.9, EmbeddingFloat32Base64: embeddingOf(1, 1)}}
+	secondScan.Replaces = true
+	var faces []Face
+	if status, body := service.call(http.MethodPost, "/face-scans", secondScan, &faces); status != http.StatusCreated || len(faces) != 2 || faces[0].ID != "face_000002" {
+		t.Fatalf("a replacing scan = %d %s, want 201 with face_000002 and face_000003", status, body)
+	}
+	service.call(http.MethodGet, "/photos/photo_000001/faces", nil, &faces)
+	if len(faces) != 2 || faces[0].ID != "face_000002" {
+		t.Errorf("faces after the rescan = %+v, want only the new two", faces)
+	}
+	var links []PhotoPerson
+	service.call(http.MethodGet, "/photo-people?photo_id=photo_000001", nil, &links)
+	if len(links) != 1 || links[0].Status != "confirmed" || links[0].FaceID != "" || !strings.Contains(links[0].Evidence, "face_000001") {
+		t.Fatalf("the link after the rescan = %+v, want it confirmed with no face and a note naming the retired one", links)
+	}
+	if status, _ := service.call(http.MethodPost, "/photo-people", PhotoPersonProposal{PhotoID: "photo_000001", PersonID: "person_000002",
+		FaceID: "face_000001", Status: "suggested", ProposedBy: "matcher"}, nil); status != http.StatusBadRequest {
+		t.Errorf("a link naming a retired face = %d, want 400", status)
+	}
+	var link PhotoPerson
+	service.call(http.MethodPost, "/photo-people", PhotoPersonProposal{PhotoID: "photo_000001", PersonID: "person_000001",
+		FaceID: "face_000002", Status: "suggested", ProposedBy: "matcher"}, &link)
+	if link.Status != "confirmed" || link.FaceID != "face_000002" || link.DecidedBy != "operator" {
+		t.Errorf("a matcher naming the face of a confirmed link with none = %+v, want the face taken and the decision kept", link)
+	}
+	if status, _ := service.call(http.MethodPost, "/face-scans", firstScan, nil); status != http.StatusConflict {
+		t.Errorf("a second scan without replaces = %d, want 409", status)
+	}
+}
+
+func TestAnImportThatChangesTheThumbnailRetiresItsFacesAndTheSameThumbnailDoesNot(t *testing.T) {
+	service := newTestService(t)
+	photo := photoOf("s", 100)
+	service.call(http.MethodPost, "/imports", ImportRequest{Photos: []ImportPhoto{photo}}, nil)
+	service.call(http.MethodPost, "/face-scans", FaceScan{PhotoID: "photo_000001", Model: "test-model", Faces: []ScannedFace{
+		{Box: FaceBox{Left: 0.1, Top: 0.1, Right: 0.3, Bottom: 0.4}, DetectionScore: 0.9, EmbeddingFloat32Base64: embeddingOf(1, 0)}}}, nil)
+
+	var result ImportResult
+	service.call(http.MethodPost, "/imports", ImportRequest{Photos: []ImportPhoto{photo}}, &result)
+	var pending []string
+	service.call(http.MethodGet, "/face-scans/pending?model=test-model", nil, &pending)
+	if result.FacesRetired != 0 || len(pending) != 0 {
+		t.Fatalf("the same thumbnail again retired %d faces and left pending %v, want nothing", result.FacesRetired, pending)
+	}
+
+	photo.ThumbnailJPEG = realJPEG(t)
+	service.call(http.MethodPost, "/imports", ImportRequest{Photos: []ImportPhoto{photo}}, &result)
+	service.call(http.MethodGet, "/face-scans/pending?model=test-model", nil, &pending)
+	var faces []Face
+	service.call(http.MethodGet, "/photos/photo_000001/faces", nil, &faces)
+	if result.FacesRetired != 1 || len(pending) != 1 || len(faces) != 0 {
+		t.Errorf("a new thumbnail retired %d faces, left pending %v and faces %+v; want 1 retired, the photo pending and no faces", result.FacesRetired, pending, faces)
 	}
 }
