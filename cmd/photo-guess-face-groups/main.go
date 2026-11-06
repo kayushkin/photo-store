@@ -77,6 +77,18 @@ const systemPrompt = `You help the owner of a private photo archive work out who
 	`who it might be, for example a chat member the archive has no person for. Say one_person false when the ` +
 	`faces are clearly several people. Be calibrated: a confidence of 0.9 should be right nine times in ten.`
 
+const contextOnlySystemPrompt = `You help the owner of a private photo archive keep its records straight. ` +
+	`A face-recognition model grouped one person's appearances across the owner's photos. You see a few of those ` +
+	`photos, that person inside a red box, and what the archive's own records say about the photos: where each was ` +
+	`posted or sent and by whom, who was in that chat, the caption and messages sent around it, and a description ` +
+	`written earlier. Candidates are people in the owner's contacts, each with an id, a name, and how many of the ` +
+	`photos their records name them on. Do not judge by facial features: decide from the records and the scene ` +
+	`which candidate the records point to as the boxed person — a caption or description naming who is shown, the ` +
+	`few members of a private chat, a recurring role such as the bride at a wedding, the sender of selfies. A person ` +
+	`who posts photos of an event is often not in them. When the records point to nobody, leave person_id empty and ` +
+	`say who it might be. Say one_person false when the boxed people are clearly different people. Be calibrated: ` +
+	`a confidence of 0.9 should be right nine times in ten.`
+
 type settings struct {
 	storeURL, bridgeURL, bridgeToken, modelStoreURL, peopleURL, messageStoreURL string
 	multichatURL, multichatToken                                                string
@@ -92,7 +104,10 @@ type guesser struct {
 	links     []photostore.PhotoPerson
 	photos    map[string]photostore.Photo
 	persons   map[string]person
-	mutex     sync.Mutex
+	messages  map[string]photoMessage // photo id → its message
+	// contextOnly are models asked without faces to compare.
+	contextOnly map[string]bool
+	mutex       sync.Mutex
 }
 
 type person struct {
@@ -104,6 +119,10 @@ type person struct {
 func main() {
 	operator := flag.String("operator", "", "the person_ id whose photos these are")
 	models := flag.String("models", "claude-opus-5-5,gpt-6-astra", "comma-separated model-store ids to ask, each on its own")
+	// gpt-6-astra answered on 2026-11-06 that it cannot identify someone from
+	// their face or confirm a face matches a contact, while reading the
+	// records fine; asked without faces, it judges from the records.
+	contextOnlyModels := flag.String("context-only-models", "gpt-6-astra", "comma-separated models of -models asked to judge from the records and whole photos, with no faces to compare")
 	limit := flag.Int("limit", 20, "ask about at most this many groups, the most photos first")
 	groupID := flag.String("group", "", "ask about this one face group only")
 	storeURL := flag.String("store-url", "http://"+photostore.DefaultListenAddress, "photo-store's base URL")
@@ -135,7 +154,13 @@ func main() {
 			modelIDs = append(modelIDs, model)
 		}
 	}
-	if err := run(web, config, *operator, modelIDs, *limit, *groupID, *dryRun); err != nil {
+	contextOnly := map[string]bool{}
+	for _, model := range strings.Split(*contextOnlyModels, ",") {
+		if model = strings.TrimSpace(model); model != "" {
+			contextOnly[model] = true
+		}
+	}
+	if err := run(web, config, *operator, modelIDs, contextOnly, *limit, *groupID, *dryRun); err != nil {
 		fail(err)
 	}
 }
@@ -195,7 +220,7 @@ func instancesFor(web photocontext.Client, config settings, models []string) (ma
 	return instances, nil
 }
 
-func run(web photocontext.Client, config settings, operator string, models []string, limit int, onlyGroup string, dryRun bool) error {
+func run(web photocontext.Client, config settings, operator string, models []string, contextOnly map[string]bool, limit int, onlyGroup string, dryRun bool) error {
 	instances, err := instancesFor(web, config, models)
 	if err != nil {
 		return err
@@ -213,7 +238,8 @@ func run(web photocontext.Client, config settings, operator string, models []str
 		return err
 	}
 	g := &guesser{web: web, config: config, reader: reader, operator: operator, instances: instances, links: links,
-		photos: map[string]photostore.Photo{}, persons: map[string]person{}}
+		photos: map[string]photostore.Photo{}, persons: map[string]person{},
+		messages: map[string]photoMessage{}, contextOnly: contextOnly}
 	for _, photo := range photoList {
 		g.photos[photo.ID] = photo
 	}
@@ -242,9 +268,17 @@ func run(web photocontext.Client, config settings, operator string, models []str
 			continue
 		}
 		asked++
-		question, err := g.question(group)
-		if err != nil {
-			return fmt.Errorf("%s: %w", group.ID, err)
+		questions := map[bool]question{}
+		for _, model := range waiting {
+			withFaces := !g.contextOnly[model]
+			if _, built := questions[withFaces]; built {
+				continue
+			}
+			built, err := g.question(group, withFaces)
+			if err != nil {
+				return fmt.Errorf("%s: %w", group.ID, err)
+			}
+			questions[withFaces] = built
 		}
 		type answer struct {
 			model string
@@ -254,7 +288,7 @@ func run(web photocontext.Client, config settings, operator string, models []str
 		answers := make(chan answer, len(waiting))
 		for _, model := range waiting {
 			go func(model string) {
-				guess, err := g.ask(model, question)
+				guess, err := g.ask(model, questions[!g.contextOnly[model]])
 				answers <- answer{model, guess, err}
 			}(model)
 		}
@@ -313,6 +347,7 @@ type question struct {
 	images     []msg.OneShotImage
 	candidates map[string]bool
 	tally      string
+	withFaces  bool
 }
 
 func (g *guesser) personByID(id string) (person, error) {
@@ -339,6 +374,23 @@ type photoMessage struct {
 var fileNameLike = regexp.MustCompile(`(?i)^[^\s]+\.(jpe?g|png|gif|webp|heic|mp4|mov)$`)
 
 func (g *guesser) messageOf(photo photostore.Photo) (photoMessage, error) {
+	g.mutex.Lock()
+	cached, seen := g.messages[photo.ID]
+	g.mutex.Unlock()
+	if seen {
+		return cached, nil
+	}
+	found, err := g.readMessageOf(photo)
+	if err != nil {
+		return photoMessage{}, err
+	}
+	g.mutex.Lock()
+	g.messages[photo.ID] = found
+	g.mutex.Unlock()
+	return found, nil
+}
+
+func (g *guesser) readMessageOf(photo photostore.Photo) (photoMessage, error) {
 	messageID := ""
 	switch {
 	case strings.HasPrefix(photo.SourcePath, "chat_message_"):
@@ -439,8 +491,11 @@ func spread[T any](items []T, count int) []T {
 	return picked
 }
 
-func (g *guesser) question(group photostore.FaceGroup) (question, error) {
-	q := question{groupID: group.ID, candidates: map[string]bool{}}
+// question builds one group's prompt. withFaces shows the group's faces and
+// candidates' confirmed faces and asks for a comparison; without, the model
+// sees only the whole photos, the person boxed, and judges from the records.
+func (g *guesser) question(group photostore.FaceGroup, withFaces bool) (question, error) {
+	q := question{groupID: group.ID, candidates: map[string]bool{}, withFaces: withFaces}
 	memberPhotos := map[string]bool{}
 	memberFaces := map[string]bool{}
 	byTime := append([]photostore.FaceGroupMember(nil), group.Members...)
@@ -511,13 +566,15 @@ func (g *guesser) question(group photostore.FaceGroup) (question, error) {
 	fmt.Fprintf(&prompt, "Face group %s: %d faces on %d photos, taken %s to %s.\n\n", group.ID, group.FaceCount, group.PhotoCount,
 		dateOf(group.FirstTakenAt), dateOf(group.LastTakenAt))
 
-	fmt.Fprintf(&prompt, "Images 1 to %d are faces from the group.\n", min(groupFacesShown, len(group.SampleFaceIDs)))
-	for _, faceID := range spread(group.SampleFaceIDs, groupFacesShown) {
-		data, err := g.get(g.config.storeURL + "/faces/" + url.PathEscape(faceID) + "/image")
-		if err != nil {
-			return question{}, err
+	if withFaces {
+		fmt.Fprintf(&prompt, "Images 1 to %d are faces from the group.\n", min(groupFacesShown, len(group.SampleFaceIDs)))
+		for _, faceID := range spread(group.SampleFaceIDs, groupFacesShown) {
+			data, err := g.get(g.config.storeURL + "/faces/" + url.PathEscape(faceID) + "/image")
+			if err != nil {
+				return question{}, err
+			}
+			addImage(data)
 		}
-		addImage(data)
 	}
 	wholeStart := len(images) + 1
 	wholeMembers := spread(byTime, wholePhotosShown)
@@ -563,7 +620,7 @@ func (g *guesser) question(group photostore.FaceGroup) (question, error) {
 		if suggested[personID] > 0 {
 			fmt.Fprintf(&prompt, "; a face matcher suggested them for %d of the group's faces", suggested[personID])
 		}
-		if faceID := confirmedFace[personID]; faceID != "" && shownFaces < candidatesWithFaces {
+		if faceID := confirmedFace[personID]; withFaces && faceID != "" && shownFaces < candidatesWithFaces {
 			data, err := g.get(g.config.storeURL + "/faces/" + url.PathEscape(faceID) + "/image")
 			if err != nil {
 				return question{}, err
@@ -613,7 +670,11 @@ func (g *guesser) question(group photostore.FaceGroup) (question, error) {
 		}
 		prompt.WriteString(".\n")
 	}
-	prompt.WriteString("\nWho is the person in this group?")
+	if withFaces {
+		prompt.WriteString("\nWho is the person in this group?")
+	} else {
+		prompt.WriteString("\nWhich candidate do these records say is the person in the red box, if any?")
+	}
 	q.prompt, q.images = prompt.String(), images
 
 	var tally []string
@@ -712,7 +773,11 @@ func (g *guesser) boxedPhoto(member photostore.FaceGroupMember) ([]byte, error) 
 // ask puts one group's question to one model and turns its answer into a
 // guess.
 func (g *guesser) ask(model string, q question) (photostore.FaceGroupGuessProposal, error) {
-	body, err := json.Marshal(msg.OneShotRequest{Prompt: q.prompt, SystemPrompt: systemPrompt, Model: model, Caller: guesserName,
+	system := systemPrompt
+	if !q.withFaces {
+		system = contextOnlySystemPrompt
+	}
+	body, err := json.Marshal(msg.OneShotRequest{Prompt: q.prompt, SystemPrompt: system, Model: model, Caller: guesserName,
 		Schema: json.RawMessage(guessSchema), Images: q.images})
 	if err != nil {
 		return photostore.FaceGroupGuessProposal{}, err
