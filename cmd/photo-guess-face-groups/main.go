@@ -82,7 +82,7 @@ const contextOnlySystemPrompt = `You help the owner of a private photo archive k
 	`photos, that person inside a red box, and what the archive's own records say about the photos: where each was ` +
 	`posted or sent and by whom, who was in that chat, the caption and messages sent around it, and a description ` +
 	`written earlier. Candidates are people in the owner's contacts, each with an id, a name, and how many of the ` +
-	`photos their records name them on. Do not judge by facial features: decide from the records and the scene ` +
+	`photos their records name them on: their chats, or a description of the photo that links them. Do not judge by facial features: decide from the records and the scene ` +
 	`which candidate the records point to as the boxed person — a caption or description naming who is shown, the ` +
 	`few members of a private chat, a recurring role such as the bride at a wedding, the sender of selfies. A person ` +
 	`who posts photos of an event is often not in them. When the records point to nobody, leave person_id empty and ` +
@@ -123,6 +123,7 @@ func main() {
 	// their face or confirm a face matches a contact, while reading the
 	// records fine; asked without faces, it judges from the records.
 	contextOnlyModels := flag.String("context-only-models", "gpt-6-astra", "comma-separated models of -models asked to judge from the records and whole photos, with no faces to compare")
+	askAgain := flag.Bool("ask-again", false, "ask about groups a model already answered, as well")
 	limit := flag.Int("limit", 20, "ask about at most this many groups, the most photos first")
 	groupID := flag.String("group", "", "ask about this one face group only")
 	storeURL := flag.String("store-url", "http://"+photostore.DefaultListenAddress, "photo-store's base URL")
@@ -160,7 +161,7 @@ func main() {
 			contextOnly[model] = true
 		}
 	}
-	if err := run(web, config, *operator, modelIDs, contextOnly, *limit, *groupID, *dryRun); err != nil {
+	if err := run(web, config, *operator, modelIDs, contextOnly, *askAgain, *limit, *groupID, *dryRun); err != nil {
 		fail(err)
 	}
 }
@@ -220,7 +221,7 @@ func instancesFor(web photocontext.Client, config settings, models []string) (ma
 	return instances, nil
 }
 
-func run(web photocontext.Client, config settings, operator string, models []string, contextOnly map[string]bool, limit int, onlyGroup string, dryRun bool) error {
+func run(web photocontext.Client, config settings, operator string, models []string, contextOnly map[string]bool, askAgain bool, limit int, onlyGroup string, dryRun bool) error {
 	instances, err := instancesFor(web, config, models)
 	if err != nil {
 		return err
@@ -260,7 +261,7 @@ func run(web photocontext.Client, config settings, operator string, models []str
 		}
 		waiting := []string{}
 		for _, model := range models {
-			if !answeredSinceLastChange(group, model) {
+			if askAgain || !answeredSinceLastChange(group, model) {
 				waiting = append(waiting, model)
 			}
 		}
@@ -370,6 +371,8 @@ type photoMessage struct {
 	sender, caption string
 	around          []string
 }
+
+var personReference = regexp.MustCompile(`ref:(person_[0-9]{6,})`)
 
 var fileNameLike = regexp.MustCompile(`(?i)^[^\s]+\.(jpe?g|png|gif|webp|heic|mp4|mov)$`)
 
@@ -525,6 +528,18 @@ func (g *guesser) question(group photostore.FaceGroup, withFaces bool) (question
 			}
 		}
 	}
+	// People a photo's description links ([Vika](ref:person_…)): whoever
+	// described it knew who was there.
+	described := map[string]int{}
+	for _, member := range readPhotos {
+		seen := map[string]bool{}
+		for _, match := range personReference.FindAllStringSubmatch(g.photos[member.PhotoID].Description, -1) {
+			if !seen[match[1]] {
+				seen[match[1]] = true
+				described[match[1]]++
+			}
+		}
+	}
 	suggested := map[string]int{}
 	for _, link := range g.links {
 		if memberFaces[link.FaceID] && link.Status == photostore.PhotoPersonSuggested {
@@ -537,6 +552,9 @@ func (g *guesser) question(group photostore.FaceGroup, withFaces bool) (question
 	}
 	for personID, count := range suggested {
 		scores[personID] += count
+	}
+	for personID, count := range described {
+		scores[personID] += 2 * count
 	}
 	ranked := make([]string, 0, len(scores))
 	for personID := range scores {
@@ -617,6 +635,9 @@ func (g *guesser) question(group photostore.FaceGroup, withFaces bool) (question
 		if named[personID] > 0 {
 			fmt.Fprintf(&prompt, "; the context names them on %d of the %d photos read", named[personID], len(readPhotos))
 		}
+		if described[personID] > 0 {
+			fmt.Fprintf(&prompt, "; the description names them on %d of the %d photos read", described[personID], len(readPhotos))
+		}
 		if suggested[personID] > 0 {
 			fmt.Fprintf(&prompt, "; a face matcher suggested them for %d of the group's faces", suggested[personID])
 		}
@@ -680,7 +701,10 @@ func (g *guesser) question(group photostore.FaceGroup, withFaces bool) (question
 	var tally []string
 	for _, personID := range ranked {
 		if named[personID] > 0 {
-			tally = append(tally, fmt.Sprintf("[%s](ref:%s) named on %d of %d photos read", g.persons[personID].DisplayName, personID, named[personID], len(readPhotos)))
+			tally = append(tally, fmt.Sprintf("[%s](ref:%s)'s chats on %d of %d photos read", g.persons[personID].DisplayName, personID, named[personID], len(readPhotos)))
+		}
+		if described[personID] > 0 {
+			tally = append(tally, fmt.Sprintf("[%s](ref:%s) in the description of %d", g.persons[personID].DisplayName, personID, described[personID]))
 		}
 	}
 	q.tally = strings.Join(tally, "; ")
