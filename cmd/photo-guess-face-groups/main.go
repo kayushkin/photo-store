@@ -72,7 +72,7 @@ const systemPrompt = `You help the owner of a private photo archive work out who
 	`their context names them on; some come with a face already confirmed as them. ` +
 	`Lean on the context: a person who posts photos of an event is often not in them, a small private chat names ` +
 	`its few members, a caption or reply may name who is shown, and the setting, era and company say a lot. ` +
-	`Compare with a candidate's confirmed face when there is one, allowing for age, hair, glasses and beards. ` +
+	`Compare with a candidate's confirmed face when there is one, allowing for age, hair, glasses and beards. The owner's own rejections are facts: a matcher once mistook a stranger for a contact from chat context alone, and the owner rejected it. ` +
 	`Answer with a candidate's id only when the evidence points to them; otherwise leave person_id empty and say ` +
 	`who it might be, for example a chat member the archive has no person for. Say one_person false when the ` +
 	`faces are clearly several people. Be calibrated: a confidence of 0.9 should be right nine times in ten.`
@@ -541,9 +541,15 @@ func (g *guesser) question(group photostore.FaceGroup, withFaces bool) (question
 		}
 	}
 	suggested := map[string]int{}
+	// rejected counts the group's photos on which a person said someone is
+	// not there: a decision the models must not argue with.
+	rejected := map[string]int{}
 	for _, link := range g.links {
 		if memberFaces[link.FaceID] && link.Status == photostore.PhotoPersonSuggested {
 			suggested[link.PersonID]++
+		}
+		if memberPhotos[link.PhotoID] && link.Status == photostore.PhotoPersonRejected {
+			rejected[link.PersonID]++
 		}
 	}
 	scores := map[string]int{}
@@ -555,6 +561,11 @@ func (g *guesser) question(group photostore.FaceGroup, withFaces bool) (question
 	}
 	for personID, count := range described {
 		scores[personID] += 2 * count
+	}
+	for personID, count := range rejected {
+		if _, candidate := scores[personID]; candidate {
+			scores[personID] -= 3 * count
+		}
 	}
 	ranked := make([]string, 0, len(scores))
 	for personID := range scores {
@@ -641,6 +652,9 @@ func (g *guesser) question(group photostore.FaceGroup, withFaces bool) (question
 		if suggested[personID] > 0 {
 			fmt.Fprintf(&prompt, "; a face matcher suggested them for %d of the group's faces", suggested[personID])
 		}
+		if rejected[personID] > 0 {
+			fmt.Fprintf(&prompt, "; the owner said %d of these photos do not show them, or that a face on them is not them", rejected[personID])
+		}
 		if faceID := confirmedFace[personID]; withFaces && faceID != "" && shownFaces < candidatesWithFaces {
 			data, err := g.get(g.config.storeURL + "/faces/" + url.PathEscape(faceID) + "/image")
 			if err != nil {
@@ -705,6 +719,9 @@ func (g *guesser) question(group photostore.FaceGroup, withFaces bool) (question
 		}
 		if described[personID] > 0 {
 			tally = append(tally, fmt.Sprintf("[%s](ref:%s) in the description of %d", g.persons[personID].DisplayName, personID, described[personID]))
+		}
+		if rejected[personID] > 0 {
+			tally = append(tally, fmt.Sprintf("[%s](ref:%s) rejected by the owner on %d", g.persons[personID].DisplayName, personID, rejected[personID]))
 		}
 	}
 	q.tally = strings.Join(tally, "; ")
