@@ -106,3 +106,34 @@ func TestAFaceGroupRefusesBadDecisionsAndOnlyAnOpenOneTakesFaces(t *testing.T) {
 		t.Errorf("a group of another model's faces = %d, want 400", status)
 	}
 }
+
+func TestANamedGroupNamedAsSomeoneElseMovesItsFaces(t *testing.T) {
+	service := newTestService(t)
+	threePhotosWithFaces(t, service)
+	service.call(http.MethodPost, "/face-groups", NewFaceGroup{Model: "test-model", MadeBy: "grouper", Members: []NewFaceGroupMember{
+		{FaceID: "face_000001", Similarity: 1}, {FaceID: "face_000002", Similarity: 1}}}, nil)
+	service.call(http.MethodPost, "/face-groups/face_group_000001/decision", FaceGroupDecision{Status: "named", PersonID: "person_000002", DecidedBy: "operator"}, nil)
+
+	for _, refused := range []FaceGroupDecision{
+		{Status: "named", PersonID: "person_000002", DecidedBy: "operator"},
+		{Status: "not_known", DecidedBy: "operator"},
+		{Status: "named", PersonID: "person_000001", DecidedBy: "operator", ExcludedFaceIDs: []string{"face_000001"}},
+	} {
+		if status, _ := service.call(http.MethodPost, "/face-groups/face_group_000001/decision", refused, nil); status != http.StatusConflict {
+			t.Errorf("decision %+v on a named group = %d, want 409", refused, status)
+		}
+	}
+	var result FaceGroupDecisionResult
+	status, body := service.call(http.MethodPost, "/face-groups/face_group_000001/decision", FaceGroupDecision{Status: "named", PersonID: "person_000001", DecidedBy: "operator"}, &result)
+	if status != http.StatusOK || result.Confirmed != 2 || result.PreviousPersonRejected != 2 || result.Group.PersonID != "person_000001" {
+		t.Fatalf("renaming the group = %d %s", status, body)
+	}
+	var links []PhotoPerson
+	service.call(http.MethodGet, "/photo-people?photo_id=photo_000001", nil, &links)
+	for _, link := range links {
+		want := map[string]string{"person_000001": "confirmed", "person_000002": "rejected"}[link.PersonID]
+		if link.Status != want {
+			t.Errorf("%s on photo_000001 is %s, want %s", link.PersonID, link.Status, want)
+		}
+	}
+}

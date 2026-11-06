@@ -337,8 +337,9 @@ func (s *Store) faceGroupGuesses(id string) ([]FaceGroupGuess, error) {
 // /photo-people: a person's rejection holds, and a confirmed link stays. A
 // suggestion of anyone else on those faces is rejected, since a face is one
 // person. An open group can be decided; a group left not_known or mixed can
-// still be named; a named group is final here, and a wrong face on it is
-// fixed link by link with PATCH /photo-people.
+// still be named; a named group can only be named as someone else, which
+// rejects the first person's links on its faces and confirms the new one's.
+// A single wrong face on it is fixed with PATCH /photo-people.
 func (s *Store) DecideFaceGroup(id string, decision FaceGroupDecision) (FaceGroupDecisionResult, error) {
 	if !slices.Contains([]string{FaceGroupNamed, FaceGroupNotKnown, FaceGroupMixed}, decision.Status) {
 		return FaceGroupDecisionResult{}, fmt.Errorf("%w: a decision's status is named, not_known or mixed, got %q", ErrInvalid, decision.Status)
@@ -359,14 +360,15 @@ func (s *Store) DecideFaceGroup(id string, decision FaceGroupDecision) (FaceGrou
 		return FaceGroupDecisionResult{}, err
 	}
 	defer tx.Rollback()
-	var status string
-	if err := tx.QueryRow(`SELECT status FROM face_groups WHERE id = ?`, id).Scan(&status); errors.Is(err, sql.ErrNoRows) {
+	var status, previousPerson string
+	if err := tx.QueryRow(`SELECT status, person_id FROM face_groups WHERE id = ?`, id).Scan(&status, &previousPerson); errors.Is(err, sql.ErrNoRows) {
 		return FaceGroupDecisionResult{}, fmt.Errorf("%w: no face group %s", ErrNotFound, id)
 	} else if err != nil {
 		return FaceGroupDecisionResult{}, err
 	}
-	if status == FaceGroupNamed {
-		return FaceGroupDecisionResult{}, fmt.Errorf("%w: %s is already named; change its photos' links one by one", ErrConflict, id)
+	renaming := status == FaceGroupNamed
+	if renaming && (decision.Status != FaceGroupNamed || decision.PersonID == previousPerson || len(decision.ExcludedFaceIDs) > 0) {
+		return FaceGroupDecisionResult{}, fmt.Errorf("%w: %s is named as %s; it can only be named as someone else, with no faces left out", ErrConflict, id, previousPerson)
 	}
 	if status != FaceGroupOpen && decision.Status != FaceGroupNamed {
 		return FaceGroupDecisionResult{}, fmt.Errorf("%w: %s is %s; it can still be named, not decided again", ErrConflict, id, status)
@@ -407,6 +409,21 @@ func (s *Store) DecideFaceGroup(id string, decision FaceGroupDecision) (FaceGrou
 			return FaceGroupDecisionResult{}, err
 		}
 		evidence := fmt.Sprintf("Named with [a face group](ref:%s).", id)
+		if renaming {
+			// The group was named as someone else: those links on its faces
+			// were this group's word, and its word changed.
+			faceIDs := make([]string, 0, len(members))
+			for _, each := range members {
+				faceIDs = append(faceIDs, each.faceID)
+			}
+			withdrawn, err := rejectPersonOnFaces(tx, faceIDs, previousPerson, decision.DecidedBy,
+				fmt.Sprintf("[The face group](ref:%s) these faces are in was named as [someone else](ref:%s) instead.", id, decision.PersonID), at)
+			if err != nil {
+				return FaceGroupDecisionResult{}, err
+			}
+			result.PreviousPersonRejected = withdrawn
+			evidence = fmt.Sprintf("Named with [a face group](ref:%s), which was first named as [someone else](ref:%s).", id, previousPerson)
+		}
 		for _, each := range members {
 			link, created, err := proposePhotoPersonInTransaction(tx, PhotoPersonProposal{PhotoID: each.photoID, PersonID: decision.PersonID,
 				FaceID: each.faceID, Status: PhotoPersonConfirmed, Confidence: 1, Evidence: evidence, ProposedBy: decision.DecidedBy,
@@ -439,6 +456,40 @@ func (s *Store) DecideFaceGroup(id string, decision FaceGroupDecision) (FaceGrou
 	}
 	result.Group, err = s.FaceGroupByID(id, false)
 	return result, err
+}
+
+// rejectPersonOnFaces rejects a person's links that name any of the faces,
+// whatever their status, keeping each old row as a revision.
+func rejectPersonOnFaces(tx *sql.Tx, faceIDs []string, personID, decidedBy, note string, at int64) (int, error) {
+	links := []PhotoPerson{}
+	for _, faceID := range faceIDs {
+		rows, err := tx.Query(`SELECT `+photoPersonColumns+` FROM photo_people WHERE face_id = ? AND person_id = ? AND status != ?`, faceID, personID, PhotoPersonRejected)
+		if err != nil {
+			return 0, err
+		}
+		for rows.Next() {
+			link, err := scanPhotoPerson(rows)
+			if err != nil {
+				rows.Close()
+				return 0, err
+			}
+			links = append(links, link)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return 0, err
+		}
+	}
+	for _, link := range links {
+		if err := keepPhotoPersonRevision(tx, link, at); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(`UPDATE photo_people SET status = ?, decided_by = ?, evidence = ?, updated_at = ? WHERE id = ?`,
+			PhotoPersonRejected, decidedBy, strings.TrimSpace(link.Evidence+"\n\n"+note), at, link.ID); err != nil {
+			return 0, err
+		}
+	}
+	return len(links), nil
 }
 
 // rejectOtherSuggestionsOnFace rejects suggestions that a face is someone

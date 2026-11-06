@@ -107,6 +107,8 @@ type FaceGroupGuessProposal struct {
 // FaceGroupDecision is the body of POST /face-groups/{id}/decision: a
 // person saying who a group is. Status named needs PersonID. Faces in
 // ExcludedFaceIDs are taken out of the group first, as not the same person.
+// A named group can be named again as someone else, with no faces left out:
+// a correction, or two records of one person made one.
 type FaceGroupDecision struct {
 	Status          string   `json:"status"`
 	PersonID        string   `json:"person_id"`
@@ -130,4 +132,8 @@ type FaceGroupDecisionResult struct {
 	OthersRejected int `json:"others_rejected"`
 	// Excluded counts faces taken out of the group.
 	Excluded int `json:"excluded"`
+	// PreviousPersonRejected counts, when a named group is named as someone
+	// else, the links to the person it was named as on its faces, now
+	// rejected.
+	PreviousPersonRejected int `json:"previous_person_rejected"`
 }
