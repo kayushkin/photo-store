@@ -345,6 +345,16 @@ func (s *Store) ProposePhotoPerson(proposal PhotoPersonProposal) (PhotoPerson, b
 		return PhotoPerson{}, false, err
 	}
 	defer tx.Rollback()
+	link, created, err := proposePhotoPersonInTransaction(tx, proposal, now())
+	if err != nil {
+		return PhotoPerson{}, false, err
+	}
+	return link, created, tx.Commit()
+}
+
+// proposePhotoPersonInTransaction is ProposePhotoPerson's work inside a
+// transaction the caller commits, for a proposal already validated.
+func proposePhotoPersonInTransaction(tx *sql.Tx, proposal PhotoPersonProposal, at int64) (PhotoPerson, bool, error) {
 	var deletedAt int64
 	if err := tx.QueryRow(`SELECT deleted_at FROM photos WHERE id = ?`, proposal.PhotoID).Scan(&deletedAt); errors.Is(err, sql.ErrNoRows) {
 		return PhotoPerson{}, false, fmt.Errorf("%w: no photo %s", ErrNotFound, proposal.PhotoID)
@@ -358,7 +368,6 @@ func (s *Store) ProposePhotoPerson(proposal PhotoPersonProposal) (PhotoPerson, b
 	if proposal.Status == PhotoPersonConfirmed {
 		decidedBy = proposal.DecidedBy
 	}
-	at := now()
 	existing, err := scanPhotoPerson(tx.QueryRow(`SELECT `+photoPersonColumns+` FROM photo_people WHERE photo_id = ? AND person_id = ?`,
 		proposal.PhotoID, proposal.PersonID))
 	switch {
@@ -375,7 +384,7 @@ func (s *Store) ProposePhotoPerson(proposal PhotoPersonProposal) (PhotoPerson, b
 			link.Confidence, link.Evidence, link.ProposedBy, link.DecidedBy, at, at); err != nil {
 			return PhotoPerson{}, false, err
 		}
-		return link, true, tx.Commit()
+		return link, true, nil
 	case err != nil:
 		return PhotoPerson{}, false, err
 	}
@@ -389,10 +398,10 @@ func (s *Store) ProposePhotoPerson(proposal PhotoPersonProposal) (PhotoPerson, b
 		if _, err := tx.Exec(`UPDATE photo_people SET face_id = ?, updated_at = ? WHERE id = ?`, existing.FaceID, at, existing.ID); err != nil {
 			return PhotoPerson{}, false, err
 		}
-		return existing, false, tx.Commit()
+		return existing, false, nil
 	}
 	if existing.Status != PhotoPersonSuggested {
-		return existing, false, tx.Commit()
+		return existing, false, nil
 	}
 	if err := keepPhotoPersonRevision(tx, existing, at); err != nil {
 		return PhotoPerson{}, false, err
@@ -407,7 +416,7 @@ func (s *Store) ProposePhotoPerson(proposal PhotoPersonProposal) (PhotoPerson, b
 		nullableFaceID(updated.FaceID), updated.Status, updated.Confidence, updated.Evidence, updated.ProposedBy, updated.DecidedBy, at, updated.ID); err != nil {
 		return PhotoPerson{}, false, err
 	}
-	return updated, false, tx.Commit()
+	return updated, false, nil
 }
 
 // DecidePhotoPerson answers PATCH /photo-people/{id}: a person confirming or

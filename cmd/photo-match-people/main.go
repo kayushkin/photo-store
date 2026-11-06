@@ -19,23 +19,20 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"image"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/kayushkin/llm-bridge/servicesettings"
 	photostore "github.com/kayushkin/photo-store"
-	"github.com/kayushkin/photo-store/internal/messagecitation"
 	"github.com/kayushkin/photo-store/internal/peoplematching"
+	"github.com/kayushkin/photo-store/internal/photocontext"
 )
 
 const matcherName = "photo-match-people"
@@ -45,211 +42,7 @@ const matcherName = "photo-match-people"
 const (
 	minimumFaceWidth      = 0.035
 	minimumDetectionScore = 0.6
-	// largestChatForContext is the most members a room may have for all of
-	// them to count as context; a bigger room counts only its sender.
-	largestChatForContext = 8
 )
-
-var personReference = regexp.MustCompile(`ref:(person_[0-9]{6,})`)
-
-type client struct {
-	http *http.Client
-}
-
-func (c client) getJSON(target string, headers map[string]string, out any) error {
-	request, err := http.NewRequest(http.MethodGet, target, nil)
-	if err != nil {
-		return err
-	}
-	for key, value := range headers {
-		request.Header.Set(key, value)
-	}
-	response, err := c.http.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		return err
-	}
-	if response.StatusCode == http.StatusNotFound {
-		return errNotFound
-	}
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: %d %s", target, response.StatusCode, bytes.TrimSpace(body))
-	}
-	return json.Unmarshal(body, out)
-}
-
-var errNotFound = fmt.Errorf("not found")
-
-func (c client) postJSON(target string, payload any) (int, []byte, error) {
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return 0, nil, err
-	}
-	response, err := c.http.Post(target, "application/json", bytes.NewReader(encoded))
-	if err != nil {
-		return 0, nil, err
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	return response.StatusCode, body, err
-}
-
-type settings struct {
-	storeURL, multichatURL, multichatToken, journalURL, peopleURL string
-	messages                                                      messagecitation.Store
-}
-
-// contextReader finds the people a photo's source names, caching each look-up.
-type contextReader struct {
-	client
-	settings
-	rooms   map[string]room
-	persons map[string]string // matrix user id → person id, "" for nobody
-	entries map[string][]string
-	// conversations caches message-store's conversations by id.
-	conversations map[string]messagecitation.Conversation
-	operatorID    string
-}
-
-type room struct {
-	MemberCount int `json:"member_count"`
-	Members     []struct {
-		UserID string `json:"user_id"`
-	} `json:"members"`
-	RoomID string `json:"room_id"`
-}
-
-func (r *contextReader) loadRooms() error {
-	var rooms []room
-	if err := r.getJSON(r.multichatURL+"/api/conversations", map[string]string{"Authorization": "Bearer " + r.multichatToken}, &rooms); err != nil {
-		return fmt.Errorf("multichat conversations: %w", err)
-	}
-	r.rooms = map[string]room{}
-	for _, each := range rooms {
-		r.rooms[each.RoomID] = each
-	}
-	return nil
-}
-
-func (r *contextReader) personOfUser(userID string) (string, error) {
-	if personID, known := r.persons[userID]; known {
-		return personID, nil
-	}
-	var answer struct {
-		Person struct {
-			ID string `json:"id"`
-		} `json:"person"`
-	}
-	err := r.getJSON(r.peopleURL+"/identities/resolve?"+url.Values{"kind": {"matrix_user"}, "value": {userID}}.Encode(), nil, &answer)
-	if err != nil && err != errNotFound {
-		return "", fmt.Errorf("people-store resolve %s: %w", userID, err)
-	}
-	r.persons[userID] = answer.Person.ID
-	return answer.Person.ID, nil
-}
-
-// peopleOf answers the people a photo's source names, with a short reason
-// in markdown for the evidence.
-func (r *contextReader) peopleOf(photo photostore.Photo) (map[string]string, error) {
-	named := map[string]string{}
-	switch {
-	case strings.HasPrefix(photo.SourcePath, "message_"):
-		var answer struct {
-			Messages []struct {
-				RoomID       string `json:"room_id"`
-				SenderUserID string `json:"sender_user_id"`
-				RoomName     string `json:"room_name"`
-			} `json:"messages"`
-		}
-		err := r.getJSON(r.multichatURL+"/api/message-log/"+url.PathEscape(photo.SourcePath), map[string]string{"Authorization": "Bearer " + r.multichatToken}, &answer)
-		if err == errNotFound || (err == nil && len(answer.Messages) == 0) {
-			return named, nil
-		}
-		if err != nil {
-			return nil, fmt.Errorf("multichat %s: %w", photo.SourcePath, err)
-		}
-		message := answer.Messages[0]
-		users := []string{message.SenderUserID}
-		reason := fmt.Sprintf("sent in [%s](ref:%s)", message.RoomName, photo.SourcePath)
-		if each, known := r.rooms[message.RoomID]; known && each.MemberCount <= largestChatForContext {
-			users = users[:0]
-			for _, member := range each.Members {
-				users = append(users, member.UserID)
-			}
-			// The operator is in every small chat of their own, under
-			// whichever handle that app gives them.
-			if r.operatorID != "" {
-				named[r.operatorID] = reason
-			}
-		} else {
-			reason = fmt.Sprintf("posted in [%s](ref:%s)", message.RoomName, photo.SourcePath)
-		}
-		for _, userID := range users {
-			personID, err := r.personOfUser(userID)
-			if err != nil {
-				return nil, err
-			}
-			if personID != "" {
-				named[personID] = reason
-			}
-		}
-	case strings.HasPrefix(photo.SourcePath, "chat_message_"):
-		message, err := r.settings.messages.MessageByID(photo.SourcePath)
-		if err != nil {
-			return nil, err
-		}
-		conversation, cached := r.conversations[message.ConversationID]
-		if !cached {
-			if conversation, err = r.settings.messages.ConversationByID(message.ConversationID); err != nil {
-				return nil, err
-			}
-			r.conversations[message.ConversationID] = conversation
-		}
-		reason := fmt.Sprintf("sent in [%s](ref:%s)", conversation.Title, photo.SourcePath)
-		if len(conversation.Participants) > largestChatForContext {
-			if message.SenderPersonID != "" {
-				named[message.SenderPersonID] = fmt.Sprintf("posted in [%s](ref:%s)", conversation.Title, photo.SourcePath)
-			}
-			break
-		}
-		// Everyone in a small chat, the operator included under whichever
-		// handle that app gives them.
-		for _, participant := range conversation.Participants {
-			if participant.PersonID != "" {
-				named[participant.PersonID] = reason
-			}
-		}
-		if r.operatorID != "" {
-			named[r.operatorID] = reason
-		}
-	case strings.HasPrefix(photo.SourcePath, "entry_"):
-		people, cached := r.entries[photo.SourcePath]
-		if !cached {
-			var entry struct {
-				Body string `json:"body"`
-			}
-			if err := r.getJSON(r.journalURL+"/entries/"+url.PathEscape(photo.SourcePath), nil, &entry); err != nil && err != errNotFound {
-				return nil, fmt.Errorf("journal-store %s: %w", photo.SourcePath, err)
-			}
-			for _, match := range personReference.FindAllStringSubmatch(entry.Body, -1) {
-				people = append(people, match[1])
-			}
-			r.entries[photo.SourcePath] = people
-		}
-		for _, personID := range people {
-			named[personID] = fmt.Sprintf("in [the day's chat](ref:%s)", photo.SourcePath)
-		}
-		// The operator is in every chat of their own.
-		if len(people) > 0 && r.operatorID != "" {
-			named[r.operatorID] = fmt.Sprintf("in [the day's chat](ref:%s)", photo.SourcePath)
-		}
-	}
-	return named, nil
-}
 
 func main() {
 	operator := flag.String("operator", "", "the person_ id whose photos these are, who is in every chat")
@@ -269,11 +62,8 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	config := settings{storeURL: strings.TrimRight(*storeURL, "/"),
-		multichatURL: strings.TrimRight(registry.String(photostore.SettingMultichatURL), "/"), multichatToken: registry.String(photostore.SettingMultichatToken),
-		journalURL: strings.TrimRight(registry.String(photostore.SettingJournalStoreURL), "/"), peopleURL: strings.TrimRight(registry.String(photostore.SettingPeopleStoreURL), "/"),
-		messages: messagecitation.Store{Base: registry.String(photostore.SettingMessageStoreURL), Client: &http.Client{Timeout: time.Minute}}}
-	web := client{http: &http.Client{Timeout: 2 * time.Minute}}
+	config := settings{storeURL: strings.TrimRight(*storeURL, "/"), sources: photocontext.SourcesFromSettings(registry)}
+	web := photocontext.Client{HTTP: &http.Client{Timeout: 2 * time.Minute}}
 	if err := run(web, config, *operator, *model, *seedPerson, *seedPhotos, *seedDecidedBy, *dryRun); err != nil {
 		fail(err)
 	}
@@ -288,7 +78,7 @@ func main() {
 		if err := checker.loadFaceBoxes(*model); err != nil {
 			fail(err)
 		}
-		links, err := loadLinks(web, config.storeURL)
+		links, err := photocontext.LoadLinks(web, config.storeURL)
 		if err != nil {
 			fail(err)
 		}
@@ -305,7 +95,13 @@ func fail(err error) {
 	os.Exit(1)
 }
 
-func run(web client, config settings, operator, model, seedPerson, seedPhotos, seedDecidedBy string, dryRun bool) error {
+// settings are where the matcher reads and writes.
+type settings struct {
+	storeURL string
+	sources  photocontext.Sources
+}
+
+func run(web photocontext.Client, config settings, operator, model, seedPerson, seedPhotos, seedDecidedBy string, dryRun bool) error {
 	faces, err := loadFaces(web, config.storeURL, model)
 	if err != nil {
 		return err
@@ -316,7 +112,7 @@ func run(web client, config settings, operator, model, seedPerson, seedPhotos, s
 		facesByPhoto[face.PhotoID] = append(facesByPhoto[face.PhotoID], face)
 		faceByID[face.ID] = face
 	}
-	links, err := loadLinks(web, config.storeURL)
+	links, err := photocontext.LoadLinks(web, config.storeURL)
 	if err != nil {
 		return err
 	}
@@ -361,7 +157,7 @@ func run(web client, config settings, operator, model, seedPerson, seedPhotos, s
 		if dryRun {
 			return nil
 		}
-		status, body, err := web.postJSON(config.storeURL+"/photo-people", proposal)
+		status, body, err := web.PostJSON(config.storeURL+"/photo-people", proposal)
 		if err != nil {
 			return err
 		}
@@ -389,13 +185,12 @@ func run(web client, config settings, operator, model, seedPerson, seedPhotos, s
 		}
 	}
 
-	photos, err := loadPhotos(web, config.storeURL)
+	photos, err := photocontext.LoadPhotos(web, config.storeURL)
 	if err != nil {
 		return err
 	}
-	reader := &contextReader{client: web, settings: config, persons: map[string]string{}, entries: map[string][]string{},
-		conversations: map[string]messagecitation.Conversation{}, operatorID: operator}
-	if err := reader.loadRooms(); err != nil {
+	reader, err := photocontext.NewReader(web, config.sources, operator)
+	if err != nil {
 		return err
 	}
 	contextOf := map[string]map[string]string{}
@@ -403,7 +198,7 @@ func run(web client, config settings, operator, model, seedPerson, seedPhotos, s
 		if len(facesByPhoto[photo.ID]) == 0 {
 			continue
 		}
-		named, err := reader.peopleOf(photo)
+		named, err := reader.PeopleOf(photo)
 		if err != nil {
 			return err
 		}
@@ -512,7 +307,7 @@ func run(web client, config settings, operator, model, seedPerson, seedPhotos, s
 	return nil
 }
 
-func loadFaces(web client, storeURL, model string) ([]peoplematching.Face, error) {
+func loadFaces(web photocontext.Client, storeURL, model string) ([]peoplematching.Face, error) {
 	var faces []peoplematching.Face
 	after := ""
 	for {
@@ -521,7 +316,7 @@ func loadFaces(web client, storeURL, model string) ([]peoplematching.Face, error
 			query.Set("after", after)
 		}
 		var page []photostore.Face
-		if err := web.getJSON(storeURL+"/faces?"+query.Encode(), nil, &page); err != nil {
+		if err := web.GetJSON(storeURL+"/faces?"+query.Encode(), nil, &page); err != nil {
 			return nil, fmt.Errorf("faces: %w", err)
 		}
 		for _, face := range page {
@@ -538,33 +333,5 @@ func loadFaces(web client, storeURL, model string) ([]peoplematching.Face, error
 			return faces, nil
 		}
 		after = page[len(page)-1].ID
-	}
-}
-
-func loadLinks(web client, storeURL string) ([]photostore.PhotoPerson, error) {
-	var links []photostore.PhotoPerson
-	for offset := 0; ; offset += 5000 {
-		var page []photostore.PhotoPerson
-		if err := web.getJSON(fmt.Sprintf("%s/photo-people?limit=5000&offset=%d", storeURL, offset), nil, &page); err != nil {
-			return nil, fmt.Errorf("photo-people: %w", err)
-		}
-		links = append(links, page...)
-		if len(page) < 5000 {
-			return links, nil
-		}
-	}
-}
-
-func loadPhotos(web client, storeURL string) ([]photostore.Photo, error) {
-	var photos []photostore.Photo
-	for offset := 0; ; offset += 1000 {
-		var page []photostore.Photo
-		if err := web.getJSON(fmt.Sprintf("%s/photos?limit=1000&offset=%d", storeURL, offset), nil, &page); err != nil {
-			return nil, fmt.Errorf("photos: %w", err)
-		}
-		photos = append(photos, page...)
-		if len(page) < 1000 {
-			return photos, nil
-		}
 	}
 }

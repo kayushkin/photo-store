@@ -117,3 +117,47 @@ CREATE TABLE IF NOT EXISTS photo_person_revisions (
     replaced_at     INTEGER NOT NULL,
     row_json        TEXT NOT NULL
 );
+
+-- Face groups: faces a grouper found to be one person, waiting for a person
+-- to say who (status open), then named as a people-store person, marked as
+-- someone not to name (not_known), or left as more than one person (mixed).
+-- Naming a group confirms each of its faces as the person in photo_people.
+-- A face is in at most one group at a time; a face taken out of a group as
+-- not the same person keeps its row with released_at set.
+CREATE TABLE IF NOT EXISTS face_groups (
+    id              TEXT PRIMARY KEY,              -- face_group_000001
+    seq             INTEGER NOT NULL UNIQUE,
+    model           TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('open', 'named', 'not_known', 'mixed')),
+    person_id       TEXT NOT NULL DEFAULT '',
+    made_by         TEXT NOT NULL,
+    decided_by      TEXT NOT NULL DEFAULT '',
+    decided_at      INTEGER NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS face_group_members (
+    group_id        TEXT NOT NULL REFERENCES face_groups(id),
+    face_id         TEXT NOT NULL REFERENCES faces(id),
+    similarity      REAL NOT NULL,
+    added_at        INTEGER NOT NULL,
+    released_at     INTEGER NOT NULL DEFAULT 0,
+    released_by     TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (group_id, face_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_face_group_members_face ON face_group_members(face_id) WHERE released_at = 0;
+
+-- Who a group might be, from a model or the context of its photos. Kept as
+-- written; a later guess is added beside it.
+CREATE TABLE IF NOT EXISTS face_group_guesses (
+    id              TEXT PRIMARY KEY,              -- face_group_guess_000001
+    seq             INTEGER NOT NULL UNIQUE,
+    group_id        TEXT NOT NULL REFERENCES face_groups(id),
+    person_id       TEXT NOT NULL DEFAULT '',
+    confidence      REAL NOT NULL,
+    evidence        TEXT NOT NULL DEFAULT '',
+    proposed_by     TEXT NOT NULL,
+    created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_face_group_guesses_group ON face_group_guesses(group_id);

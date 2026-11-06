@@ -19,13 +19,14 @@ import (
 	"github.com/kayushkin/llm-bridge/msg"
 	photostore "github.com/kayushkin/photo-store"
 	"github.com/kayushkin/photo-store/internal/peoplematching"
+	"github.com/kayushkin/photo-store/internal/photocontext"
 )
 
 // modelChecker asks a model that can see whether a suggested face is the
 // person suggested, by showing it the face beside faces already known to be
 // them, and confirms or rejects the suggestion on its answer.
 type modelChecker struct {
-	web          client
+	web          photocontext.Client
 	storeURL     string
 	bridgeURL    string
 	serviceToken string
@@ -54,7 +55,7 @@ func (c *modelChecker) thumbnail(photoID string) (image.Image, error) {
 	if cached, seen := c.thumbnails[photoID]; seen {
 		return cached, nil
 	}
-	response, err := c.web.http.Get(c.storeURL + "/photos/" + url.PathEscape(photoID) + "/thumbnail")
+	response, err := c.web.HTTP.Get(c.storeURL + "/photos/" + url.PathEscape(photoID) + "/thumbnail")
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +148,7 @@ func (c *modelChecker) ask(faceID string, knownFaceIDs []string, context string)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-LLM-Bridge-Service-Token", c.serviceToken)
-	response, err := c.web.http.Do(request)
+	response, err := c.web.HTTP.Do(request)
 	if err != nil {
 		return modelVerdict{}, err
 	}
@@ -170,6 +171,8 @@ func (c *modelChecker) ask(faceID string, knownFaceIDs []string, context string)
 	verdict.Model = reply.Model
 	return verdict, nil
 }
+
+var personReference = regexp.MustCompile(`ref:(person_[0-9]{6,})`)
 
 // markdownToPlain drops the ref chips from evidence, leaving their text, for
 // a prompt.
@@ -266,7 +269,7 @@ func (c *modelChecker) patch(id string, change photostore.PhotoPersonDecision) e
 }
 
 // patchLink sends one PATCH /photo-people/{id}.
-func patchLink(web client, storeURL, id string, change photostore.PhotoPersonDecision) error {
+func patchLink(web photocontext.Client, storeURL, id string, change photostore.PhotoPersonDecision) error {
 	body, err := json.Marshal(change)
 	if err != nil {
 		return err
@@ -276,7 +279,7 @@ func patchLink(web client, storeURL, id string, change photostore.PhotoPersonDec
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := web.http.Do(request)
+	response, err := web.HTTP.Do(request)
 	if err != nil {
 		return err
 	}
@@ -298,7 +301,7 @@ func (c *modelChecker) loadFaceBoxes(model string) error {
 			query.Set("after", after)
 		}
 		var page []photostore.Face
-		if err := c.web.getJSON(c.storeURL+"/faces?"+query.Encode(), nil, &page); err != nil {
+		if err := c.web.GetJSON(c.storeURL+"/faces?"+query.Encode(), nil, &page); err != nil {
 			return fmt.Errorf("faces: %w", err)
 		}
 		for _, face := range page {
@@ -335,7 +338,7 @@ func (c *modelChecker) yearOf(photoID string) string {
 	}
 	year := "unknown year"
 	var photo photostore.Photo
-	if err := c.web.getJSON(c.storeURL+"/photos/"+url.PathEscape(photoID), nil, &photo); err == nil && photo.TakenAt > 0 {
+	if err := c.web.GetJSON(c.storeURL+"/photos/"+url.PathEscape(photoID), nil, &photo); err == nil && photo.TakenAt > 0 {
 		year = time.Unix(photo.TakenAt, 0).UTC().Format("2006")
 	}
 	c.years[photoID] = year

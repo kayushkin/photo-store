@@ -10,7 +10,7 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$HOME/bin"
 SERVICE="photo-store.service"
 BINARY="photo-store"
-TOOLS=(photo-import photo-import-messages photo-import-facebook photo-match-people)
+TOOLS=(photo-import photo-import-messages photo-import-facebook photo-match-people photo-group-faces photo-guess-face-groups)
 UNIT_SRC="$REPO_DIR/$SERVICE"
 UNIT_DEST="$HOME/.config/systemd/user/$SERVICE"
 cd "$REPO_DIR"

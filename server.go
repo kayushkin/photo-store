@@ -32,6 +32,7 @@ func RegisterHandlers(mux *http.ServeMux, s *Store) {
 	mux.HandleFunc("GET /photos/{id}/revisions", h.revisions)
 	mux.HandleFunc("GET /photos/{id}/thumbnail", h.thumbnail)
 	registerFaceHandlers(mux, h)
+	registerFaceGroupHandlers(mux, h)
 }
 
 type handler struct {

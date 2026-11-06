@@ -12,3 +12,5 @@ packages:
       - "schema_embed.go"
       - "faces_store.go"
       - "faces_server.go"
+      - "face_groups_store.go"
+      - "face_groups_server.go"
