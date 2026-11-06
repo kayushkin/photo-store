@@ -76,3 +76,27 @@ func TestAFaceJoinsTheOpenGroupItClearlyBelongsTo(t *testing.T) {
 		t.Errorf("result = %+v, want nothing else: the other faces are alone", result)
 	}
 }
+
+func TestTwoGroupsOfOnePersonMergeUnlessTheyShareAPhoto(t *testing.T) {
+	// A strict join splits one person into two clusters a merge brings back.
+	settings := Settings{JoinSimilarity: 0.97, MinimumMargin: 0.05, MinimumPhotos: 3, MergeSimilarity: 0.5}
+	free := []Face{faceOn("p1", 0, 0), faceOn("p2", 0, 0.01), faceOn("p3", 0, 0.5), faceOn("p4", 0, 0.51)}
+	result := Assign(free, nil, settings)
+	if len(result.Created) != 1 || len(result.Created[0].Members) != 4 {
+		t.Fatalf("groups = %+v, want one group of four faces", result.Created)
+	}
+
+	// The same, but a face of each cluster on one photo: two people.
+	free = []Face{faceOn("p1", 0, 0), faceOn("p2", 0, 0.01), faceOn("p5", 0, 0.02), faceOn("p1", 0, 0.5), faceOn("p3", 0, 0.51), faceOn("p4", 0, 0.52)}
+	free[3].ID = "other-face-on-p1"
+	if result := Assign(free, nil, settings); len(result.Created) != 2 {
+		t.Errorf("groups = %d, want 2: a face of each on one photo means two people", len(result.Created))
+	}
+
+	// A new cluster merges into an open group close to it.
+	open := []Group{{ID: "face_group_000001", Members: []Member{{Face: faceOn("p1", 0, 0)}, {Face: faceOn("p2", 0, 0.01)}}}}
+	result = Assign([]Face{faceOn("p3", 0, 0.5), faceOn("p4", 0, 0.51)}, open, settings)
+	if len(result.Joined["face_group_000001"]) != 2 || len(result.Created) != 0 {
+		t.Errorf("result = %+v, want both faces merged into face_group_000001", result)
+	}
+}

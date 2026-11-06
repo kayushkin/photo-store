@@ -11,6 +11,7 @@
 package facegrouping
 
 import (
+	"container/heap"
 	"math"
 	"sort"
 
@@ -28,12 +29,20 @@ type Settings struct {
 	// MinimumPhotos is the fewest photos a new group must span to be kept;
 	// a face seen once or twice waits for more.
 	MinimumPhotos int
+	// MergeSimilarity is how close two groups' average faces must be for
+	// them to merge, when they share no photo.
+	MergeSimilarity float64
 }
 
 // DefaultSettings: buffalo_l faces of one person usually score above 0.5
 // against each other and of two people below 0.3; against an average face,
 // which is cleaner than any one face, one person's score higher still.
-var DefaultSettings = Settings{JoinSimilarity: 0.5, MinimumMargin: 0.05, MinimumPhotos: 3}
+//
+// MergeSimilarity was measured on 2026-11-06 against 165 groups a person had
+// named: at 0.5, averages joined 59 of 188 pairs of groups that were one
+// person and no pair that was two, once two people recorded twice in the
+// contacts were counted as one; at 0.45 a pair of two people joined.
+var DefaultSettings = Settings{JoinSimilarity: 0.5, MinimumMargin: 0.05, MinimumPhotos: 3, MergeSimilarity: 0.5}
 
 // Face is a face to group, with how sure the finder was it is a face.
 type Face struct {
@@ -63,6 +72,7 @@ type Result struct {
 }
 
 type cluster struct {
+	merged bool
 	id     string
 	sum    []float64
 	photos map[string]bool
@@ -124,6 +134,7 @@ func Assign(free []Face, open []Group, settings Settings) Result {
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].DetectionScore > ordered[j].DetectionScore })
 
 	left := []Face{}
+	joinedFaces := map[int][]Face{}
 	for _, face := range ordered {
 		best, second, bestIndex := -1.0, -1.0, -1
 		for index, each := range existing {
@@ -140,6 +151,7 @@ func Assign(free []Face, open []Group, settings Settings) Result {
 		if bestIndex >= 0 && best >= settings.JoinSimilarity && best-second >= settings.MinimumMargin {
 			existing[bestIndex].photos[face.PhotoID] = true
 			result.Joined[existing[bestIndex].id] = append(result.Joined[existing[bestIndex].id], Member{Face: face, Similarity: best})
+			joinedFaces[bestIndex] = append(joinedFaces[bestIndex], face)
 			continue
 		}
 		left = append(left, face)
@@ -188,8 +200,28 @@ func Assign(free []Face, open []Group, settings Settings) Result {
 	copy(secondAverages, settled)
 	second = place(left, second, secondAverages)
 
+	for index, faces := range joinedFaces {
+		for _, face := range faces {
+			existing[index].sum = addTo(existing[index].sum, face.Embedding)
+			existing[index].faces = append(existing[index].faces, face)
+		}
+	}
+	fresh := []*cluster{}
 	for _, each := range second {
-		if len(each.photos) < settings.MinimumPhotos {
+		if len(each.faces) > 0 {
+			fresh = append(fresh, each)
+		}
+	}
+	for existingIndex, faces := range mergeClusters(existing, fresh, settings.MergeSimilarity) {
+		id := existing[existingIndex].id
+		average := existing[existingIndex].average()
+		for _, face := range faces {
+			result.Joined[id] = append(result.Joined[id], Member{Face: face, Similarity: peoplematching.Similarity(face.Embedding, average)})
+		}
+	}
+
+	for _, each := range fresh {
+		if each.merged || len(each.photos) < settings.MinimumPhotos {
 			continue
 		}
 		average := each.average()
@@ -202,4 +234,110 @@ func Assign(free []Face, open []Group, settings Settings) Result {
 	}
 	sort.SliceStable(result.Created, func(i, j int) bool { return len(result.Created[i].Members) > len(result.Created[j].Members) })
 	return result
+}
+
+func addTo(sum []float64, embedding []float32) []float64 {
+	for index, value := range embedding {
+		sum[index] += float64(value)
+	}
+	return sum
+}
+
+func sharePhoto(a, b *cluster) bool {
+	if len(a.photos) > len(b.photos) {
+		a, b = b, a
+	}
+	for photo := range a.photos {
+		if b.photos[photo] {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeClusters merges, closest pair first, clusters whose averages reach
+// threshold and share no photo: two faces on one photo are two people. The
+// same person often forms several clusters — another year, another light —
+// whose averages still match better than two people's do. A new cluster
+// merges into an open group (fresh into existing); two open groups never
+// merge, since the store keeps them apart. It marks each fresh cluster that
+// merged away, and answers the faces each open group took.
+func mergeClusters(existing, fresh []*cluster, threshold float64) map[int][]Face {
+	all := append(append([]*cluster{}, existing...), fresh...)
+	isExisting := func(index int) bool { return index < len(existing) }
+	averages := make([][]float32, len(all))
+	for index, each := range all {
+		averages[index] = each.average()
+	}
+	version := make([]int, len(all))
+	alive := make([]bool, len(all))
+	for index := range alive {
+		alive[index] = true
+	}
+	candidates := &pairHeap{}
+	offer := func(a, b int) {
+		if a > b {
+			a, b = b, a
+		}
+		if isExisting(a) && isExisting(b) {
+			return
+		}
+		if similarity := peoplematching.Similarity(averages[a], averages[b]); similarity >= threshold {
+			heap.Push(candidates, pair{a: a, b: b, similarity: similarity, versionA: version[a], versionB: version[b]})
+		}
+	}
+	for a := range all {
+		for b := a + 1; b < len(all); b++ {
+			offer(a, b)
+		}
+	}
+	taken := map[int][]Face{}
+	for candidates.Len() > 0 {
+		next := heap.Pop(candidates).(pair)
+		if !alive[next.a] || !alive[next.b] || version[next.a] != next.versionA || version[next.b] != next.versionB || sharePhoto(all[next.a], all[next.b]) {
+			continue
+		}
+		// a < b, so an open group, listed first, is always a.
+		target, source := all[next.a], all[next.b]
+		for _, face := range source.faces {
+			target.sum = addTo(target.sum, face.Embedding)
+			target.photos[face.PhotoID] = true
+			target.faces = append(target.faces, face)
+			if isExisting(next.a) {
+				taken[next.a] = append(taken[next.a], face)
+			}
+		}
+		source.merged, alive[next.b] = true, false
+		averages[next.a] = target.average()
+		version[next.a]++
+		for other := range all {
+			if other != next.a && alive[other] {
+				offer(next.a, other)
+			}
+		}
+	}
+	return taken
+}
+
+// pair is two clusters that may merge, with the versions of each it was
+// measured at: a merge changes a cluster's average, and a pair measured
+// before that is stale.
+type pair struct {
+	a, b               int
+	similarity         float64
+	versionA, versionB int
+}
+
+// pairHeap pops the closest pair first.
+type pairHeap []pair
+
+func (h pairHeap) Len() int           { return len(h) }
+func (h pairHeap) Less(i, j int) bool { return h[i].similarity > h[j].similarity }
+func (h pairHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *pairHeap) Push(x any)        { *h = append(*h, x.(pair)) }
+func (h *pairHeap) Pop() any {
+	old := *h
+	last := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return last
 }
