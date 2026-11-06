@@ -6,12 +6,15 @@ package photocontext
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kayushkin/llm-bridge/servicesettings"
@@ -48,7 +51,7 @@ func (c Client) GetJSON(target string, headers map[string]string, out any) error
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
-	response, err := c.HTTP.Do(request)
+	response, err := c.Do(request)
 	if err != nil {
 		return err
 	}
@@ -75,13 +78,43 @@ func (c Client) PostJSON(target string, payload any) (int, []byte, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	response, err := c.HTTP.Post(target, "application/json", bytes.NewReader(encoded))
+	request, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(encoded))
+	if err != nil {
+		return 0, nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.Do(request)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(response.Body)
 	return response.StatusCode, body, err
+}
+
+// restartWait is how long Do waits out a refused connection: a deploy
+// restarts a store in seconds, and a long run should not die of it.
+const restartWait = 2 * time.Minute
+
+// Do sends a request, sending it again every 5 seconds while the connection
+// is refused, for up to restartWait. Any other failure is returned at once.
+func (c Client) Do(request *http.Request) (*http.Response, error) {
+	deadline := time.Now().Add(restartWait)
+	for {
+		if request.GetBody != nil {
+			body, err := request.GetBody()
+			if err != nil {
+				return nil, err
+			}
+			request.Body = body
+		}
+		response, err := c.HTTP.Do(request)
+		if err == nil || !errors.Is(err, syscall.ECONNREFUSED) || time.Now().After(deadline) {
+			return response, err
+		}
+		fmt.Fprintf(os.Stderr, "%s %s: connection refused; trying again in 5 s\n", request.Method, request.URL.Host)
+		time.Sleep(5 * time.Second)
+	}
 }
 
 // Sources are where a photo's context is read.

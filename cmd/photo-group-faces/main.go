@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -184,7 +185,7 @@ func run(web photocontext.Client, storeURL, model string, settings facegrouping.
 			for _, member := range members {
 				addition.Members = append(addition.Members, photostore.NewFaceGroupMember{FaceID: member.Face.ID, Similarity: member.Similarity})
 			}
-			if err := post(web, storeURL+"/face-groups/"+url.PathEscape(groupID)+"/members", addition, http.StatusOK); err != nil {
+			if err := postDroppingRetiredFaces(web, storeURL+"/face-groups/"+url.PathEscape(groupID)+"/members", &addition.Members, func() any { return addition }, http.StatusOK); err != nil {
 				return err
 			}
 		}
@@ -193,7 +194,7 @@ func run(web photocontext.Client, storeURL, model string, settings facegrouping.
 			for _, member := range group.Members {
 				body.Members = append(body.Members, photostore.NewFaceGroupMember{FaceID: member.Face.ID, Similarity: member.Similarity})
 			}
-			if err := post(web, storeURL+"/face-groups", body, http.StatusCreated); err != nil {
+			if err := postDroppingRetiredFaces(web, storeURL+"/face-groups", &body.Members, func() any { return body }, http.StatusCreated); err != nil {
 				return err
 			}
 		}
@@ -203,15 +204,35 @@ func run(web photocontext.Client, storeURL, model string, settings facegrouping.
 	return nil
 }
 
-func post(web photocontext.Client, target string, payload any, want int) error {
-	status, body, err := web.PostJSON(target, payload)
-	if err != nil {
-		return err
+var retiredFace = regexp.MustCompile(`(face_[0-9]+) was retired`)
+
+// postDroppingRetiredFaces posts a body of faces; when photo-store refuses
+// one because an import or rescan retired it after this run read the faces,
+// it drops that face and posts again. A body left with no face is skipped.
+func postDroppingRetiredFaces(web photocontext.Client, target string, members *[]photostore.NewFaceGroupMember, payload func() any, want int) error {
+	for {
+		if len(*members) == 0 {
+			return nil
+		}
+		status, body, err := web.PostJSON(target, payload())
+		if err != nil {
+			return err
+		}
+		if status == want {
+			return nil
+		}
+		match := retiredFace.FindSubmatch(body)
+		if status != http.StatusBadRequest || match == nil {
+			return fmt.Errorf("POST %s: %d %s", target, status, strings.TrimSpace(string(body)))
+		}
+		kept := (*members)[:0]
+		for _, member := range *members {
+			if member.FaceID != string(match[1]) {
+				kept = append(kept, member)
+			}
+		}
+		*members = kept
 	}
-	if status != want {
-		return fmt.Errorf("POST %s: %d %s", target, status, strings.TrimSpace(string(body)))
-	}
-	return nil
 }
 
 // evaluatePurity groups every face at several thresholds and reports, among

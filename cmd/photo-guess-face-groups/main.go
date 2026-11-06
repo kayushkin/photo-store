@@ -727,7 +727,11 @@ func dateOf(epoch int64) string {
 }
 
 func (g *guesser) get(target string) ([]byte, error) {
-	response, err := g.web.HTTP.Get(target)
+	request, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := g.web.Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -812,7 +816,7 @@ func (g *guesser) ask(model string, q question) (photostore.FaceGroupGuessPropos
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-LLM-Bridge-Service-Token", g.config.bridgeToken)
-	response, err := g.web.HTTP.Do(request)
+	response, err := g.web.Do(request)
 	if err != nil {
 		return photostore.FaceGroupGuessProposal{}, err
 	}

@@ -148,7 +148,7 @@ func (c *modelChecker) ask(faceID string, knownFaceIDs []string, context string)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-LLM-Bridge-Service-Token", c.serviceToken)
-	response, err := c.web.HTTP.Do(request)
+	response, err := c.web.Do(request)
 	if err != nil {
 		return modelVerdict{}, err
 	}
@@ -279,7 +279,7 @@ func patchLink(web photocontext.Client, storeURL, id string, change photostore.P
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := web.HTTP.Do(request)
+	response, err := web.Do(request)
 	if err != nil {
 		return err
 	}
